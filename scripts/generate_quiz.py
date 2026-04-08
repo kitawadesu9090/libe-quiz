@@ -88,8 +88,18 @@ def http_get(url: str, timeout: int = 15) -> bytes:
 # ---------- RSS ----------
 
 
+def _published_to_jst_date(published: str) -> str:
+    """Convert RSS ISO8601 published timestamp to JST YYYY-MM-DD."""
+    try:
+        # Python 3.11 handles 'Z' as UTC via fromisoformat
+        dt = datetime.fromisoformat(published.replace("Z", "+00:00"))
+        return dt.astimezone(JST).strftime("%Y-%m-%d")
+    except Exception:
+        return published[:10]
+
+
 def fetch_latest_live_video() -> dict | None:
-    """Return dict with keys: video_id, title, published (YYYY-MM-DD)."""
+    """Return dict with keys: video_id, title, published (JST YYYY-MM-DD), description."""
     try:
         data = http_get(RSS_URL)
     except Exception as exc:
@@ -100,6 +110,7 @@ def fetch_latest_live_video() -> dict | None:
     ns = {
         "atom": "http://www.w3.org/2005/Atom",
         "yt": "http://www.youtube.com/xml/schemas/2015",
+        "media": "http://search.yahoo.com/mrss/",
     }
     entries = root.findall("atom:entry", ns)
     if not entries:
@@ -116,10 +127,18 @@ def fetch_latest_live_video() -> dict | None:
         title = (title_el.text or "").strip()
         vid = (vid_el.text or "").strip()
         pub = (pub_el.text or "").strip()
+        # media:description lives inside media:group
+        desc = ""
+        mg = entry.find("media:group", ns)
+        if mg is not None:
+            desc_el = mg.find("media:description", ns)
+            if desc_el is not None and desc_el.text:
+                desc = desc_el.text
         candidates.append({
             "video_id": vid,
             "title": title,
-            "published": pub[:10],
+            "published": _published_to_jst_date(pub),
+            "description": desc,
         })
 
     if not candidates:
@@ -363,9 +382,16 @@ def main() -> int:
 
     print(f"[INFO] Target video: {video['title']} ({video['published']})")
 
-    description = fetch_video_description(video["video_id"])
+    # Prefer description from RSS (no scraping needed). Fall back to scraping only if missing.
+    description = video.get("description") or ""
+    if len(description) < 100:
+        scraped = fetch_video_description(video["video_id"])
+        if scraped and len(scraped) > len(description):
+            description = scraped
     if not description:
         print("[WARN] description not found, using title only", file=sys.stderr)
+    else:
+        print(f"[INFO] Description length: {len(description)} chars")
 
     topics = extract_topics(description) if description else []
     # Fallback: split title into coarse topics.
