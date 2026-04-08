@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-Daily リベ大 quiz generator.
+Daily リベ大 quiz generator (Q&A pair aware).
 
-Runs in GitHub Actions every morning. Zero external dependencies (stdlib only).
+Parses the video's chapter markers and understands the structure:
+  - Top-level chapter that ends with ? → a viewer's question
+  - Sub-chapter (starts with └ / ├ / │) → the answer or follow-up
+  - 🦁-prefixed chapter → 学長 himself answering / asserting
 
-Flow:
-  1. Fetch YouTube RSS for 両学長 channel
-  2. Find the most recent "live" video (ライブ / 家計改善 / 収入アップ)
-  3. Scrape the video page to extract the full description with chapter markers
-  4. Parse chapter markers and description lines into topic candidates
-  5. Generate 4 quiz questions using real chapter titles as correct answers
-  6. Write quiz-data.json for the frontend to consume
+Builds quiz questions in the shape of "今日のライブで質問された ○○ に対する
+学長の答えは？" with other real answers as distractors.
 """
 
 from __future__ import annotations
@@ -22,6 +20,7 @@ import re
 import sys
 import urllib.request
 import urllib.error
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -39,38 +38,36 @@ USER_AGENT = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 
-# Pool of generic リベ大-themed distractors (used when we need filler choices)
+# Pool of generic リベ大-themed distractors used when real answers run out.
 DISTRACTOR_POOL = [
-    "インデックス投資の積立", "米国株S&P500一括買い", "全世界株式オルカン",
-    "新NISA成長投資枠の活用", "iDeCoの掛金上限引き上げ", "ふるさと納税のコツ",
-    "確定申告の裏ワザ", "医療費控除の申請方法", "副業の始め方", "せどりの稼ぎ方",
-    "プログラミング学習法", "ブログ収益化", "固定費の見直し", "格安SIMへの乗り換え",
-    "不要な保険の解約", "楽天経済圏の作り方", "家計改善の第一歩", "転職エージェントの活用",
-    "FIRE目標の立て方", "仮想通貨のリスク", "資産配分の基本", "つみたてNISAとの違い",
-    "住宅ローン繰り上げ返済", "奨学金の返し方", "小規模企業共済", "法人化のタイミング",
-    "インボイス制度対応", "年金の繰り下げ受給", "高配当ETFの選び方", "不動産投資の注意点",
-    "外貨預金のデメリット", "定期預金の代替策",
+    "まず固定費を見直すのが先決",
+    "インデックス投資を淡々と積み立てる",
+    "米国株S&P500に一括投資する",
+    "新NISAの成長投資枠を活用する",
+    "iDeCoに掛金上限まで拠出する",
+    "ふるさと納税を上限まで使う",
+    "確定申告で所得を圧縮する",
+    "副業で収入の柱を増やす",
+    "ブログやせどりで稼ぐ力をつける",
+    "格安SIMに乗り換えて固定費カット",
+    "不要な生命保険を解約する",
+    "楽天経済圏でポイントを貯める",
+    "転職エージェントで年収アップを狙う",
+    "FIRE目標を逆算して積立額を決める",
+    "仮想通貨はリスクが高いから避ける",
+    "住宅ローンは無理せず繰り上げ返済",
+    "小規模企業共済で節税する",
+    "つみたてNISAから始める",
+    "高配当ETFで不労所得を作る",
+    "法人化して経費を計上する",
+    "貯金を先に確保してから投資",
+    "子ども名義で口座を作る",
+    "変額保険は手数料が高いので不要",
+    "銀行預金より国債を選ぶ",
 ]
 
-# Question templates (topic goes in the "correct" slot)
-QUESTION_TEMPLATES = [
-    "今日の学長ライブで\n話題になったのはどれ？",
-    "今日のライブで学長が\n触れたトピックは？",
-    "今日の学長ライブで\n取り上げられたのは？",
-    "今日のライブで\n学長が解説したのは？",
-    "今日の学長ライブの\n話題として正しいのは？",
-    "今日のライブで\n質問が出たのはどれ？",
-]
 
-EXPLANATION_TEMPLATES = [
-    "正解は「{topic}」！📺\n今日のライブでしっかり解説されていました✨",
-    "正解は「{topic}」🦁\n学長が詳しく話してくれていましたね🔥",
-    "正解は「{topic}」💡\nアーカイブで復習してみよう！",
-    "正解は「{topic}」📚\n学長ライブは毎日学びがありますね✨",
-]
-
-
-# ---------- HTTP helpers ----------
+# ---------- HTTP ----------
 
 
 def http_get(url: str, timeout: int = 15) -> bytes:
@@ -89,9 +86,7 @@ def http_get(url: str, timeout: int = 15) -> bytes:
 
 
 def _published_to_jst_date(published: str) -> str:
-    """Convert RSS ISO8601 published timestamp to JST YYYY-MM-DD."""
     try:
-        # Python 3.11 handles 'Z' as UTC via fromisoformat
         dt = datetime.fromisoformat(published.replace("Z", "+00:00"))
         return dt.astimezone(JST).strftime("%Y-%m-%d")
     except Exception:
@@ -99,7 +94,7 @@ def _published_to_jst_date(published: str) -> str:
 
 
 def fetch_latest_live_video() -> dict | None:
-    """Return dict with keys: video_id, title, published (JST YYYY-MM-DD), description."""
+    """Return dict with video_id, title, published (JST YYYY-MM-DD), description."""
     try:
         data = http_get(RSS_URL)
     except Exception as exc:
@@ -127,7 +122,6 @@ def fetch_latest_live_video() -> dict | None:
         title = (title_el.text or "").strip()
         vid = (vid_el.text or "").strip()
         pub = (pub_el.text or "").strip()
-        # media:description lives inside media:group
         desc = ""
         mg = entry.find("media:group", ns)
         if mg is not None:
@@ -141,16 +135,12 @@ def fetch_latest_live_video() -> dict | None:
             "description": desc,
         })
 
-    if not candidates:
-        return None
+    # Drop Shorts
+    candidates = [
+        v for v in candidates
+        if "#shorts" not in v["title"].lower() and "#short" not in v["title"].lower()
+    ]
 
-    # Exclude Shorts (too short for meaningful quiz generation).
-    def is_shorts(v: dict) -> bool:
-        return "#shorts" in v["title"].lower() or "#short" in v["title"].lower()
-
-    candidates = [v for v in candidates if not is_shorts(v)]
-
-    # Prefer the most recent live stream. Live > non-live, regardless of age.
     today = datetime.now(JST).strftime("%Y-%m-%d")
     yesterday = (datetime.now(JST) - timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -161,89 +151,204 @@ def fetch_latest_live_video() -> dict | None:
     for bucket in (
         [v for v in candidates if v["published"] == today and is_live(v)],
         [v for v in candidates if v["published"] == yesterday and is_live(v)],
-        [v for v in candidates if is_live(v)],  # any recent live
+        [v for v in candidates if is_live(v)],
         [v for v in candidates if v["published"] == today],
         [v for v in candidates if v["published"] == yesterday],
         candidates,
     ):
         if bucket:
             return bucket[0]
-
     return None
 
 
-# ---------- Video page scraping ----------
+# ---------- Video page scraping fallback ----------
 
 
 def fetch_video_description(video_id: str) -> str:
-    """Scrape the video page for the shortDescription field."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     try:
         raw = http_get(url).decode("utf-8", errors="replace")
     except Exception as exc:
         print(f"[SCRAPE] fetch failed: {exc}", file=sys.stderr)
         return ""
-
-    # shortDescription lives in a JSON blob on the page.
     match = re.search(r'"shortDescription":"((?:\\.|[^"\\])*)"', raw)
     if not match:
         return ""
-
     escaped = match.group(1)
-    # JSON-style unescape: handle \n \" \\ \u0041 ...
     try:
-        desc = json.loads(f'"{escaped}"')
+        return json.loads(f'"{escaped}"')
     except json.JSONDecodeError:
-        desc = escaped.encode().decode("unicode_escape", errors="replace")
-    return desc
+        return escaped.encode().decode("unicode_escape", errors="replace")
 
 
-# ---------- Topic extraction ----------
+# ---------- Chapter parsing ----------
 
 
-CHAPTER_RE = re.compile(
-    r"^\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*[:：]?\s*(.+?)\s*$",
-    re.MULTILINE,
-)
-TRIM_LEADING = re.compile(r"^[└├│─\s〜～ー・\-➤►▶▼▲◎●○◆◇■□]+")
-STRIP_EMOJI_DECOR = re.compile(r"[🦁📺✨🔥💡📚💰🎉🎯⭐️⭐🌟]")
+# Matches both tree markers and plain hyphen decorators used for sub-chapters.
+SUB_PREFIX_CHARS = "└├│┗┣┃-━─"
+LION_CHARS = "🦁"
+STRIP_DECOR = re.compile(r"[🦁📺✨🔥💡📚💰🎉🎯⭐️⭐🌟]")
+STRIP_BRACKETS = re.compile(r"【[^】]*】")
+TRIM_EDGES = re.compile(rf"^[{re.escape(SUB_PREFIX_CHARS)}\s〜～ー・➤►▶▼▲◎●○◆◇■□]+")
+TRAILING_NOISE = re.compile(r"（[^（）]*の続き）$|\([^\)]*の続き\)$|\[[^\]]+\]$")
 
-# Non-informative chapter labels to skip outright.
 STOPWORD_TOPICS = {
     "intro", "Intro", "INTRO", "オープニング", "opening", "Opening", "OP", "op",
     "outro", "Outro", "エンディング", "ending", "Ending", "ED", "ed",
-    "挨拶", "ごあいさつ", "お知らせ", "cm", "CM",
 }
 
 
-def clean_topic(s: str) -> str:
-    s = STRIP_EMOJI_DECOR.sub("", s).strip()
-    s = TRIM_LEADING.sub("", s).strip()
-    s = re.sub(r"【[^】]*】", "", s).strip()
-    # Drop nested parens such as "（xx:xx の続き）"
-    s = re.sub(r"（[^（）]*の続き）$", "", s).strip()
-    s = re.sub(r"\([^\)]*の続き\)$", "", s).strip()
-    s = re.sub(r"\[[^\]]+\]$", "", s).strip()
-    return s
+@dataclass
+class Chapter:
+    time: str
+    raw: str
+    title: str
+    is_sub: bool
+    is_question: bool
+    has_lion: bool
+
+
+@dataclass
+class ChapterGroup:
+    parent: Chapter
+    children: list[Chapter] = field(default_factory=list)
+
+
+def _clean(raw: str) -> tuple[str, bool, bool]:
+    """Return (clean_title, is_sub, has_lion) for a chapter line."""
+    is_sub = False
+    for ch in raw[:3]:
+        if ch in SUB_PREFIX_CHARS:
+            is_sub = True
+            break
+    has_lion = LION_CHARS in raw
+    s = raw
+    s = STRIP_DECOR.sub("", s)
+    s = STRIP_BRACKETS.sub("", s)
+    s = TRIM_EDGES.sub("", s)
+    s = TRAILING_NOISE.sub("", s).strip()
+    return s, is_sub, has_lion
+
+
+# Words that signal a viewer question even without a trailing ?
+QUESTION_SIGNALS = (
+    "悩んでいる", "悩んでます", "悩み", "困っている", "困ってます",
+    "教えて", "教えてください", "知りたい", "迷っている", "迷って",
+    "どう思いますか", "どうでしょうか", "どうすれば", "どうすべき",
+    "アドバイス", "意見を聞きたい", "見解", "ご意見",
+)
+
+
+def _is_question_like(title: str) -> bool:
+    s = title.rstrip()
+    if s.endswith(("？", "?")):
+        return True
+    return any(sig in s for sig in QUESTION_SIGNALS)
+
+
+def parse_chapters(description: str) -> list[Chapter]:
+    if not description:
+        return []
+    chapters: list[Chapter] = []
+    for line in description.splitlines():
+        m = re.match(r"^\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*(.+?)\s*$", line)
+        if not m:
+            continue
+        time_s = m.group(1)
+        raw = m.group(2)
+        title, is_sub, has_lion = _clean(raw)
+        if not title or title in STOPWORD_TOPICS:
+            continue
+        if not (5 <= len(title) <= 80):
+            continue
+        is_q = _is_question_like(title)
+        chapters.append(Chapter(
+            time=time_s,
+            raw=raw,
+            title=title,
+            is_sub=is_sub,
+            is_question=is_q,
+            has_lion=has_lion,
+        ))
+    return chapters
+
+
+def _title_overlap(a: str, b: str) -> int:
+    """Count how many 4-char sliding substrings of the shorter string appear in the longer."""
+    if len(a) < 4 or len(b) < 4:
+        return 0
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    hits = 0
+    for i in range(len(shorter) - 3):
+        if shorter[i:i + 4] in longer:
+            hits += 1
+    return hits
+
+
+def group_by_parent(chapters: list[Chapter]) -> list[ChapterGroup]:
+    """Group top-level chapters with their sub-chapters, preferring topic matches over sequential order."""
+    groups: list[ChapterGroup] = []
+    parent_idx_by_ch: dict[int, int] = {}
+
+    # First pass: build a group for each top-level chapter.
+    for ch in chapters:
+        if not ch.is_sub:
+            groups.append(ChapterGroup(parent=ch))
+
+    if not groups:
+        # Promote the first sub-chapter, if any, to a parent.
+        if chapters:
+            first = chapters[0]
+            promoted = Chapter(
+                time=first.time, raw=first.raw, title=first.title,
+                is_sub=False, is_question=first.is_question, has_lion=first.has_lion,
+            )
+            groups.append(ChapterGroup(parent=promoted))
+        return groups
+
+    # Second pass: assign each sub-chapter to the best-matching recent parent (by topic overlap).
+    last_parent_idx = 0
+    parent_index = {id(g.parent): i for i, g in enumerate(groups)}
+    for ch in chapters:
+        if not ch.is_sub:
+            last_parent_idx = parent_index.get(id(ch), last_parent_idx)
+            continue
+        # Consider the last 3 parents (including current) and pick the best topic overlap.
+        best_idx = last_parent_idx
+        best_score = 0
+        for j in range(max(0, last_parent_idx - 2), last_parent_idx + 1):
+            score = _title_overlap(ch.title, groups[j].parent.title)
+            if score > best_score:
+                best_score = score
+                best_idx = j
+        # Require a meaningful overlap to reassign; otherwise default to the most recent.
+        if best_score >= 2:
+            groups[best_idx].children.append(ch)
+        else:
+            groups[last_parent_idx].children.append(ch)
+
+    return groups
+
+
+# ---------- Text helpers ----------
+
+
+_NORM = re.compile(r"[\s、。！？!?・「」『』【】\-ー]")
 
 
 def _norm(s: str) -> str:
-    """Normalized key used for similarity / dedup checks."""
-    return re.sub(r"[\s、。！？!?・]", "", s).lower()
+    return _NORM.sub("", s).lower()
 
 
 def _too_similar(a: str, b: str) -> bool:
-    """Return True when two topics overlap enough to confuse users."""
     na, nb = _norm(a), _norm(b)
     if not na or not nb:
         return False
     if na == nb:
         return True
-    # Substring containment on short strings is almost always the same topic.
     shorter, longer = (na, nb) if len(na) <= len(nb) else (nb, na)
-    if len(shorter) >= 4 and shorter in longer:
+    if len(shorter) >= 5 and shorter in longer:
         return True
-    # Share a long common prefix.
     common = 0
     for x, y in zip(na, nb):
         if x == y:
@@ -255,120 +360,298 @@ def _too_similar(a: str, b: str) -> bool:
     return False
 
 
-def extract_topics(description: str) -> list[str]:
-    topics: list[str] = []
-    seen: set[str] = set()
+def shorten_question(text: str, max_len: int = 38) -> str:
+    """Shorten a verbose viewer question to a tappable size."""
+    s = text.strip()
+    s = re.sub(r"^[「『]", "", s)
+    s = re.sub(r"[」』]$", "", s)
+    s = s.rstrip("？?。、.")
+    # Cut at the first major punctuation after ~12 chars
+    for sep in ("。", "、", "．", ",", "，"):
+        idx = s.find(sep)
+        if 12 <= idx <= max_len:
+            return s[:idx].strip()
+    if len(s) <= max_len:
+        return s
+    return s[:max_len].rstrip() + "…"
 
-    # 1) Chapter markers are the gold standard — they are what the host actually discussed.
-    for m in CHAPTER_RE.finditer(description):
-        raw = m.group(2)
-        topic = clean_topic(raw)
-        if topic in STOPWORD_TOPICS:
+
+# ---------- Question generators ----------
+
+
+QUESTION_TEMPLATES_QA = [
+    '今日のライブで\n「{q}」\nという質問への学長の答えは？',
+    '今日のライブで出た\n「{q}」という相談に\n学長はどう答えた？',
+    '今日のライブの\n「{q}」の\n学長の回答は？',
+]
+
+QUESTION_TEMPLATES_STATEMENT = [
+    '今日のライブで学長が\n「{q}」について\n語った内容は？',
+    '今日のライブで学長が\n強調していたのは？',
+    '今日のライブで学長が\n主張していたのは？',
+]
+
+EXPLANATION_QA = [
+    '正解は「{a}」📚\n実際のライブで学長がそう答えていました✨',
+    '正解は「{a}」🦁\nライブで学長がしっかり解説してましたね💡',
+    '正解は「{a}」🔥\n見逃した方はアーカイブで要チェック！',
+]
+
+
+def _choose_answer_from_children(children: list[Chapter]) -> Chapter | None:
+    """Pick the child that most likely contains 学長's answer. Never use a question as an answer."""
+    if not children:
+        return None
+    lion = [c for c in children if c.has_lion and not c.is_question]
+    if lion:
+        return lion[0]
+    non_q = [c for c in children if not c.is_question]
+    if non_q:
+        return non_q[0]
+    return None  # We refuse to treat another viewer question as an answer.
+
+
+def _collect_distractor_answers(all_groups: list[ChapterGroup], exclude_group: ChapterGroup) -> list[str]:
+    """Gather realistic wrong answers: non-question children from OTHER groups."""
+    results: list[str] = []
+    for g in all_groups:
+        if g is exclude_group:
             continue
-        if not (6 <= len(topic) <= 45):
-            continue
-        key = _norm(topic)[:14]
-        if key in seen:
-            continue
-        # Reject if near-duplicate of something we already collected
-        if any(_too_similar(topic, t) for t in topics):
-            continue
-        seen.add(key)
-        topics.append(topic)
-
-    # 2) If we don't have enough chapters, also split description lines.
-    if len(topics) < 6:
-        for line in description.splitlines():
-            line = line.strip()
-            if not line or line.startswith("http"):
-                continue
-            if re.match(r"^\d{1,2}:\d{2}", line):
-                continue
-            topic = clean_topic(line)
-            if 6 <= len(topic) <= 45:
-                key = topic[:12]
-                if key not in seen:
-                    seen.add(key)
-                    topics.append(topic)
-            if len(topics) >= 20:
-                break
-
-    return topics
+        for c in g.children:
+            if not c.is_question and 6 <= len(c.title) <= 34:
+                results.append(c.title)
+        # A 🦁-marked parent is also an assertion we can reuse
+        if g.parent.has_lion and not g.parent.is_question and 6 <= len(g.parent.title) <= 34:
+            results.append(g.parent.title)
+    return results
 
 
-# ---------- Quiz generation ----------
+def build_qa_question(group: ChapterGroup, all_groups: list[ChapterGroup]) -> dict | None:
+    """Build a question where the parent is a viewer question and children contain the answer."""
+    if not group.parent.is_question:
+        return None
+    answer_ch = _choose_answer_from_children(group.children)
+    if answer_ch is None:
+        return None
+    correct = answer_ch.title.rstrip("？?")
+    # Reject answers that are too short or too long to make a clean 4-choice question.
+    if not (6 <= len(correct) <= 34):
+        return None
+    # Sanity check: the answer must share keywords with the parent question.
+    # This prevents wrongly-grouped children from polluting the QA.
+    if _title_overlap(group.parent.title, correct) == 0:
+        return None
 
+    short_q = shorten_question(group.parent.title)
+    stem = random.choice(QUESTION_TEMPLATES_QA).format(q=short_q)
 
-def generate_quiz(topics: list[str], date_label: str) -> list[dict]:
-    """Generate exactly 4 quiz questions from topic candidates."""
-    if not topics:
-        return []
+    # Distractor pool: (a) other groups' real answers (b) generic pool
+    real_others = _collect_distractor_answers(all_groups, exclude_group=group)
+    random.shuffle(real_others)
 
-    random.seed()  # Nondeterministic; we commit only when the result is valid.
-
-    # Pick up to 4 distinct topics as correct answers, spacing them out for variety.
-    step = max(1, len(topics) // 4)
-    picked: list[str] = []
-    i = 0
-    while len(picked) < 4 and i < len(topics):
-        if topics[i] not in picked:
-            picked.append(topics[i])
-        i += step if len(topics) >= 8 else 1
-    # Fill any remaining slots from the head of the list.
-    for t in topics:
-        if len(picked) >= 4:
+    distractors: list[str] = []
+    for t in real_others:
+        if len(distractors) >= 2:
             break
-        if t not in picked:
-            picked.append(t)
+        if _too_similar(t, correct):
+            continue
+        if any(_too_similar(t, d) for d in distractors):
+            continue
+        distractors.append(t.rstrip("？?"))
 
-    if len(picked) < 4:
-        return []
+    pool = DISTRACTOR_POOL[:]
+    random.shuffle(pool)
+    for t in pool:
+        if len(distractors) >= 3:
+            break
+        if _too_similar(t, correct):
+            continue
+        if any(_too_similar(t, d) for d in distractors):
+            continue
+        distractors.append(t)
+
+    if len(distractors) < 3:
+        return None
+
+    correct_idx = random.randint(0, 3)
+    choices = list(distractors)
+    choices.insert(correct_idx, correct)
+
+    return {
+        "question": stem,
+        "choices": choices,
+        "correctIndex": correct_idx,
+        "explanation": random.choice(EXPLANATION_QA).format(a=correct),
+        "_source_time": group.parent.time,
+        "_source_kind": "qa",
+    }
+
+
+def build_statement_question(group: ChapterGroup, all_groups: list[ChapterGroup]) -> dict | None:
+    """Build a question around a 学長 statement (🦁 parent, non-question)."""
+    if not group.parent.has_lion or group.parent.is_question:
+        return None
+    correct = group.parent.title.rstrip("？?")
+    if not (6 <= len(correct) <= 34):
+        return None
+
+    # Variety: pick a non-parametric template at random
+    stem = random.choice([
+        '今日のライブで学長が\n強調していたのは？',
+        '今日のライブで学長が\n主張していたのは？',
+        '今日のライブで学長が\n伝えていたのは？',
+    ])
+
+    real_others = _collect_distractor_answers(all_groups, exclude_group=group)
+    random.shuffle(real_others)
+
+    distractors: list[str] = []
+    for t in real_others:
+        if len(distractors) >= 2:
+            break
+        if _too_similar(t, correct):
+            continue
+        if any(_too_similar(t, d) for d in distractors):
+            continue
+        distractors.append(t.rstrip("？?"))
+
+    pool = DISTRACTOR_POOL[:]
+    random.shuffle(pool)
+    for t in pool:
+        if len(distractors) >= 3:
+            break
+        if _too_similar(t, correct):
+            continue
+        if any(_too_similar(t, d) for d in distractors):
+            continue
+        distractors.append(t)
+
+    if len(distractors) < 3:
+        return None
+
+    correct_idx = random.randint(0, 3)
+    choices = list(distractors)
+    choices.insert(correct_idx, correct)
+
+    return {
+        "question": stem,
+        "choices": choices,
+        "correctIndex": correct_idx,
+        "explanation": random.choice(EXPLANATION_QA).format(a=correct),
+        "_source_time": group.parent.time,
+        "_source_kind": "statement",
+    }
+
+
+def build_topic_question(chapter: Chapter, all_chapters: list[Chapter]) -> dict | None:
+    """Generic fallback: 'which of these topics was discussed today?'"""
+    correct = chapter.title.rstrip("？?")
+    if not (6 <= len(correct) <= 34):
+        return None
+
+    others = [
+        c.title.rstrip("？?")
+        for c in all_chapters
+        if c is not chapter and 6 <= len(c.title) <= 60
+    ]
+    random.shuffle(others)
+
+    distractors: list[str] = []
+    for t in others:
+        if len(distractors) >= 2:
+            break
+        if _too_similar(t, correct):
+            continue
+        if any(_too_similar(t, d) for d in distractors):
+            continue
+        distractors.append(t)
+
+    pool = DISTRACTOR_POOL[:]
+    random.shuffle(pool)
+    for t in pool:
+        if len(distractors) >= 3:
+            break
+        if _too_similar(t, correct):
+            continue
+        if any(_too_similar(t, d) for d in distractors):
+            continue
+        distractors.append(t)
+
+    if len(distractors) < 3:
+        return None
+
+    correct_idx = random.randint(0, 3)
+    choices = list(distractors)
+    choices.insert(correct_idx, correct)
+
+    return {
+        "question": "今日のライブで\n実際に話題になったのはどれ？",
+        "choices": choices,
+        "correctIndex": correct_idx,
+        "explanation": f"正解は「{correct}」💡\n今日のライブで取り上げられました📺",
+        "_source_time": chapter.time,
+        "_source_kind": "topic",
+    }
+
+
+def generate_questions(chapters: list[Chapter]) -> list[dict]:
+    groups = group_by_parent(chapters)
 
     questions: list[dict] = []
-    used_templates: list[int] = []
-    for idx, correct in enumerate(picked[:4]):
-        # Pick a template we haven't used yet.
-        available = [i for i in range(len(QUESTION_TEMPLATES)) if i not in used_templates]
-        if not available:
-            available = list(range(len(QUESTION_TEMPLATES)))
-        ti = random.choice(available)
-        used_templates.append(ti)
+    used_correct: list[str] = []
 
-        # Build distractors: prefer other real topics (not similar to correct), then fall back to pool.
-        other_real = [t for t in topics if not _too_similar(t, correct)]
-        random.shuffle(other_real)
-        distractors: list[str] = []
-        for t in other_real:
-            if any(_too_similar(t, d) for d in distractors):
-                continue
-            distractors.append(t)
-            if len(distractors) >= 2:
+    # Priority 1: Q&A groups (viewer question + answer)
+    qa_groups = [g for g in groups if g.parent.is_question and g.children]
+    random.shuffle(qa_groups)
+    for g in qa_groups:
+        if len(questions) >= 4:
+            break
+        q = build_qa_question(g, groups)
+        if not q:
+            continue
+        correct = q["choices"][q["correctIndex"]]
+        if any(_too_similar(correct, u) for u in used_correct):
+            continue
+        questions.append(q)
+        used_correct.append(correct)
+
+    # Priority 2: 🦁 statement groups
+    if len(questions) < 4:
+        stmt_groups = [g for g in groups if g.parent.has_lion and not g.parent.is_question]
+        random.shuffle(stmt_groups)
+        for g in stmt_groups:
+            if len(questions) >= 4:
                 break
-        pool = [d for d in DISTRACTOR_POOL if not _too_similar(d, correct)]
-        random.shuffle(pool)
-        for d in pool:
-            if len(distractors) >= 3:
-                break
-            if any(_too_similar(d, x) for x in distractors):
+            q = build_statement_question(g, groups)
+            if not q:
                 continue
-            distractors.append(d)
+            correct = q["choices"][q["correctIndex"]]
+            if any(_too_similar(correct, u) for u in used_correct):
+                continue
+            questions.append(q)
+            used_correct.append(correct)
 
-        # Randomize correct position
-        correct_index = random.randint(0, 3)
-        choices = list(distractors)
-        choices.insert(correct_index, correct)
+    # Priority 3: plain topic questions
+    if len(questions) < 4:
+        topic_chapters = [c for c in chapters if not c.is_sub and len(c.title) >= 8]
+        random.shuffle(topic_chapters)
+        for c in topic_chapters:
+            if len(questions) >= 4:
+                break
+            q = build_topic_question(c, chapters)
+            if not q:
+                continue
+            correct = q["choices"][q["correctIndex"]]
+            if any(_too_similar(correct, u) for u in used_correct):
+                continue
+            questions.append(q)
+            used_correct.append(correct)
 
-        explanation = random.choice(EXPLANATION_TEMPLATES).format(topic=correct)
-        question_text = QUESTION_TEMPLATES[ti].replace("今日", date_label)
-
-        questions.append({
-            "question": question_text,
-            "choices": choices,
-            "correctIndex": correct_index,
-            "explanation": explanation,
-        })
-
-    return questions
+    # Strip internal bookkeeping fields
+    for q in questions:
+        q.pop("_source_time", None)
+        q.pop("_source_kind", None)
+    return questions[:4]
 
 
 # ---------- Main ----------
@@ -379,55 +662,46 @@ def main() -> int:
     if not video:
         print("[FATAL] no video found", file=sys.stderr)
         return 1
-
     print(f"[INFO] Target video: {video['title']} ({video['published']})")
 
-    # Prefer description from RSS (no scraping needed). Fall back to scraping only if missing.
     description = video.get("description") or ""
     if len(description) < 100:
         scraped = fetch_video_description(video["video_id"])
         if scraped and len(scraped) > len(description):
             description = scraped
     if not description:
-        print("[WARN] description not found, using title only", file=sys.stderr)
-    else:
-        print(f"[INFO] Description length: {len(description)} chars")
+        print("[FATAL] description not found", file=sys.stderr)
+        return 1
+    print(f"[INFO] Description length: {len(description)} chars")
 
-    topics = extract_topics(description) if description else []
-    # Fallback: split title into coarse topics.
-    if len(topics) < 4:
-        title_clean = re.sub(r"【.*?】", " ", video["title"])
-        title_clean = re.sub(r"[☆★祝✨🔥💡📺]", " ", title_clean)
-        title_topics = [
-            t.strip() for t in re.split(r"[&＆、。！!・\s]+", title_clean)
-            if 4 <= len(t.strip()) <= 40
-        ]
-        for t in title_topics:
-            if t not in topics:
-                topics.append(t)
+    chapters = parse_chapters(description)
+    print(f"[INFO] Parsed {len(chapters)} chapters ({sum(1 for c in chapters if c.is_sub)} sub, {sum(1 for c in chapters if c.is_question)} questions)")
+    if len(chapters) < 4:
+        print(f"[FATAL] not enough chapters: {len(chapters)}", file=sys.stderr)
+        return 1
 
-    if len(topics) < 4:
-        print(f"[FATAL] not enough topics: {len(topics)}", file=sys.stderr)
+    questions = generate_questions(chapters)
+    if len(questions) != 4:
+        print(f"[FATAL] generated {len(questions)} questions, expected 4", file=sys.stderr)
         return 1
 
     today = datetime.now(JST)
     today_str = today.strftime("%Y-%m-%d")
-    pub_date = video["published"]
-    if pub_date == today_str:
+    if video["published"] == today_str:
         date_label = "今日"
-    elif pub_date == (today - timedelta(days=1)).strftime("%Y-%m-%d"):
+    elif video["published"] == (today - timedelta(days=1)).strftime("%Y-%m-%d"):
         date_label = "昨日"
     else:
         try:
-            y, m, d = pub_date.split("-")
+            y, m, d = video["published"].split("-")
             date_label = f"{int(m)}/{int(d)}"
         except Exception:
             date_label = "最新"
 
-    questions = generate_quiz(topics, date_label)
-    if len(questions) != 4:
-        print(f"[FATAL] generated {len(questions)} questions, expected 4", file=sys.stderr)
-        return 1
+    # Replace "今日" in stems with the resolved label for clarity.
+    if date_label != "今日":
+        for q in questions:
+            q["question"] = q["question"].replace("今日のライブ", f"{date_label}のライブ")
 
     payload = {
         "date": today_str,
