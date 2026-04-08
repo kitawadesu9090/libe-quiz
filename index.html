@@ -410,7 +410,6 @@ function App() {
     const generateQuestionsFromRSS=async()=>{
       try{
         const rssUrl=`https://www.youtube.com/feeds/videos.xml?channel_id=${CHANNEL_ID}`;
-        // 複数プロキシを試す（1つ失敗しても別ので取得）
         const proxies=[
           `https://api.allorigins.win/raw?url=${encodeURIComponent(rssUrl)}`,
           `https://corsproxy.io/?${encodeURIComponent(rssUrl)}`,
@@ -424,37 +423,104 @@ function App() {
         const xml=parser.parseFromString(text,"text/xml");
         const entries=xml.querySelectorAll("entry");
         if(!entries||entries.length===0)return false;
+        const MRSS="http://search.yahoo.com/mrss/";
         const videos=[];
-        entries.forEach((entry,i)=>{if(i>=10)return;const title=entry.querySelector("title")?.textContent||"";const published=entry.querySelector("published")?.textContent||"";videos.push({title,date:published.substring(0,10)});});
-        // 今日→昨日→最新の順で検索
+        entries.forEach((entry,i)=>{
+          if(i>=10)return;
+          const title=entry.querySelector("title")?.textContent||"";
+          const published=entry.querySelector("published")?.textContent||"";
+          const mg=entry.getElementsByTagNameNS(MRSS,"group")[0];
+          const description=mg?.getElementsByTagNameNS(MRSS,"description")[0]?.textContent||"";
+          videos.push({title,date:published.substring(0,10),description});
+        });
         const yesterday=new Date(today);yesterday.setDate(yesterday.getDate()-1);
         const yesterdayStr=`${yesterday.getFullYear()}-${String(yesterday.getMonth()+1).padStart(2,"0")}-${String(yesterday.getDate()).padStart(2,"0")}`;
         const todayVideos=videos.filter(v=>v.date===todayStr);
         const yesterdayVideos=videos.filter(v=>v.date===yesterdayStr);
         const recentVideos=todayVideos.length>0?todayVideos:(yesterdayVideos.length>0?yesterdayVideos:videos);
-        const liveVideos=recentVideos.filter(v=>v.title.includes("ライブ")||v.title.includes("live")||v.title.includes("家計改善")||v.title.includes("収入アップ"));
+        const liveVideos=recentVideos.filter(v=>/ライブ|live|家計改善|収入アップ/i.test(v.title));
         const targetVideos=liveVideos.length>0?liveVideos:[recentVideos[0]];
-        const mainTitle=targetVideos[0]?.title||"";
+        const target=targetVideos[0];
+        const mainTitle=target?.title||"";
         if(!mainTitle)return false;
-        const targetDate=targetVideos[0]?.date||"";
+        const mainDesc=target?.description||"";
+        const targetDate=target?.date||"";
         let dateLabel="最新";
         if(targetDate===todayStr)dateLabel="今日";
         else if(targetDate===yesterdayStr)dateLabel="昨日";
         else if(targetDate)dateLabel=targetDate.replace(/^(\d{4})-(\d{2})-(\d{2})$/,(_,y,m,d)=>`${parseInt(m)}/${parseInt(d)}`);
-        const topics=mainTitle.replace(/【.*?】/g," ").replace(/[☆★祝]/g," ").split(/[&＆、。！!]+/).map(s=>s.trim()).filter(s=>s.length>3&&s.length<40);
-        if(topics.length===0)return false;
+        // タイトルからトピック抽出
+        const cleanTitle=mainTitle.replace(/【.*?】/g," ").replace(/[☆★祝✨🔥💡📺]/g," ");
+        const titleTopics=cleanTitle.split(/[&＆、。！!・\s]+/).map(s=>s.trim()).filter(s=>s.length>=3&&s.length<40);
+        // 概要欄からキーワード抽出
+        const cleanDesc=(mainDesc||"").slice(0,2000).replace(/https?:\/\/\S+/g," ").replace(/[◆◇■□▼▲◎●○▽△▶➤►]/g," ");
+        const descKeywords=[];
+        // チャプターマーカー「0:30 〜について」
+        const chapterPattern=/\d{1,2}:\d{2}\s*[:：]?\s*([^\n]{3,40})/g;
+        let m;
+        while((m=chapterPattern.exec(cleanDesc))!==null&&descKeywords.length<10){
+          const kw=m[1].trim().replace(/^[〜～ー・\-]/,"").trim();
+          if(kw.length>=3)descKeywords.push(kw);
+        }
+        // 行分割・句読点分割でも補完
+        if(descKeywords.length<4){
+          cleanDesc.split(/\n|。|、/).forEach(line=>{
+            const t=line.trim().replace(/^[〜～ー・\-・]+/,"").trim();
+            if(t.length>=5&&t.length<=40&&!/^\d+$/.test(t)&&descKeywords.length<10)descKeywords.push(t);
+          });
+        }
+        // 統合＆重複除去
+        const seen=new Set();
+        const allTopics=[...titleTopics,...descKeywords].filter(t=>{
+          const k=t.slice(0,10);if(seen.has(k))return false;seen.add(k);return true;
+        }).slice(0,10);
+        if(allTopics.length===0)return false;
+        // 豊富なダミー選択肢プール
+        const distractorPool=[
+          "インデックス投資","米国株S&P500","全世界株式","新NISA戦略",
+          "iDeCo","ふるさと納税","確定申告","節税テクニック",
+          "副業のはじめ方","せどり","プログラミング学習","ブログ運営",
+          "固定費削減","格安SIM","保険の見直し","楽天経済圏",
+          "家計改善","収入アップ","転職エージェント","FIRE戦略",
+          "仮想通貨の未来","リスク管理","キャッシュフロー","資産配分",
+          "つみたてNISA","ジュニアNISA","住宅ローン","奨学金返済",
+          "確定拠出年金","国民年金基金","小規模企業共済","医療費控除",
+        ];
+        const pickDistractors=(excluded,n)=>{
+          const exSet=new Set(excluded.filter(Boolean).map(s=>s.slice(0,4)));
+          const pool=distractorPool.filter(d=>!exSet.has(d.slice(0,4)));
+          const shuffled=[...pool].sort(()=>Math.random()-0.5);
+          return shuffled.slice(0,n);
+        };
+        // 質問テンプレート
+        const templates=[
+          (t)=>({q:`${dateLabel}の学長ライブで\nメインに語られたのは？`,e:`「${t}」がメインテーマでした📺✨`}),
+          (t)=>({q:`${dateLabel}の学長ライブで\n取り上げられたトピックは？`,e:`「${t}」について詳しく解説されました🔥`}),
+          (t)=>({q:`${dateLabel}のライブで\n話題になった内容は？`,e:`「${t}」が話題になりました💡`}),
+          (t)=>({q:`${dateLabel}のライブで\nさらに触れられたのは？`,e:`「${t}」にも言及がありました✨`}),
+          (t)=>({q:`${dateLabel}の動画で\n学長が話していたのは？`,e:`「${t}」について解説されていました📚`}),
+          (t)=>({q:`${dateLabel}の内容で\n正しいのはどれ？`,e:`正解は「${t}」でした！`}),
+        ];
         const nq=[];
-        if(topics.length>=1)nq.push({question:`${dateLabel}の学長ライブの\nメインテーマは？`,choices:[topics[0],"インデックス投資","副業のはじめ方","節税テクニック"],correctIndex:0,explanation:`${dateLabel}のライブのテーマは\n「${topics[0]}」でした！📺`});
-        if(topics.length>=2)nq.push({question:`${dateLabel}の学長ライブで\n話題になったのは？`,choices:["確定申告の裏技",topics[1],"S&P500暴落","ふるさと納税"],correctIndex:1,explanation:`「${topics[1]}」が話題になりました！🔥`});
-        if(topics.length>=3)nq.push({question:`${dateLabel}のライブで取り上げられた\nトピックはどれ？`,choices:["仮想通貨の未来","FIREの落とし穴",topics[2],"転職エージェント"],correctIndex:2,explanation:`「${topics[2]}」が取り上げられました！💡`});
-        if(topics.length>=4)nq.push({question:`${dateLabel}のライブでさらに\n触れられた内容は？`,choices:["iDeCo改正","楽天モバイル","新NISA戦略",topics[3]],correctIndex:3,explanation:`「${topics[3]}」にも触れられていました！✨`});
+        const usedTopics=[];
+        for(let i=0;i<4&&i<allTopics.length;i++){
+          const topic=allTopics[i];
+          const template=templates[i%templates.length];
+          const {q,e}=template(topic);
+          const distractors=pickDistractors([topic,...usedTopics],3);
+          const correctIndex=Math.floor(Math.random()*4);
+          const choices=[...distractors];
+          choices.splice(correctIndex,0,topic);
+          nq.push({question:q,choices,correctIndex,explanation:e});
+          usedTopics.push(topic);
+        }
         while(nq.length<3)nq.push(DEFAULT_FAN_QUESTIONS[nq.length%DEFAULT_FAN_QUESTIONS.length]);
         nq.push(makeJankenQuestion());
         const valid=nq.slice(0,Math.max(4,nq.length));
         setFanQuestions(valid);
         localStorage.setItem("libe_fan_last",todayStr);
         localStorage.setItem("libe_fan_video",mainTitle);
-        console.log("✅ ライブ問題を自動更新:",mainTitle);
+        console.log("✅ ライブ問題を自動更新:",mainTitle,"| topics:",allTopics.length);
         return true;
       }catch(e){console.log("自動取得エラー:",e);return false;}
     };
