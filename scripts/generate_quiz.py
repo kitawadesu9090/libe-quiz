@@ -552,7 +552,7 @@ def build_topic_question(chapter: Chapter, all_chapters: list[Chapter]) -> dict 
     others = [
         c.title.rstrip("？?")
         for c in all_chapters
-        if c is not chapter and 6 <= len(c.title) <= 60
+        if c is not chapter and 6 <= len(c.title) <= 34
     ]
     random.shuffle(others)
 
