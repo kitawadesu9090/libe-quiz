@@ -532,8 +532,34 @@ function App() {
     if(lastFetch===todayStr&&(now-lastTime)<threeHours){
       console.log("📺 今日のライブ問題: キャッシュ利用");return;
     }
-    generateQuestionsFromRSS().then(ok=>{
-      if(ok)localStorage.setItem("libe_fan_time",String(Date.now()));
+    // Priority: load hand-crafted quiz-data.json (if today's). Fallback: RSS auto-generation.
+    const tryLoadJson=async()=>{
+      try{
+        const res=await fetch(`./quiz-data.json?t=${Date.now()}`,{signal:AbortSignal.timeout(5000)});
+        if(!res.ok)return false;
+        const data=await res.json();
+        if(!data||!data.questions||!Array.isArray(data.questions)||data.questions.length===0)return false;
+        if(data.date!==todayStr)return false;
+        const qs=data.questions.slice(0,4).map(q=>({
+          question:q.question||"",
+          choices:Array.isArray(q.choices)?q.choices:[],
+          correctIndex:typeof q.correctIndex==="number"?q.correctIndex:0,
+          explanation:q.explanation||"",
+        }));
+        while(qs.length<4)qs.push(DEFAULT_FAN_QUESTIONS[qs.length%DEFAULT_FAN_QUESTIONS.length]);
+        qs.push(makeJankenQuestion());
+        setFanQuestions(qs);
+        localStorage.setItem("libe_fan_last",todayStr);
+        localStorage.setItem("libe_fan_video",data.videoTitle||"");
+        console.log("✅ 今日のライブ問題をJSONから読み込み:",data.videoTitle);
+        return true;
+      }catch(e){console.log("JSON読み込みエラー:",e);return false;}
+    };
+    tryLoadJson().then(ok=>{
+      if(ok){localStorage.setItem("libe_fan_time",String(Date.now()));return;}
+      generateQuestionsFromRSS().then(ok2=>{
+        if(ok2)localStorage.setItem("libe_fan_time",String(Date.now()));
+      });
     });
   },[]);
 
