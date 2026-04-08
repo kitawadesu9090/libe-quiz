@@ -125,7 +125,13 @@ def fetch_latest_live_video() -> dict | None:
     if not candidates:
         return None
 
-    # Prefer today's live, then yesterday's, then any live, then latest.
+    # Exclude Shorts (too short for meaningful quiz generation).
+    def is_shorts(v: dict) -> bool:
+        return "#shorts" in v["title"].lower() or "#short" in v["title"].lower()
+
+    candidates = [v for v in candidates if not is_shorts(v)]
+
+    # Prefer the most recent live stream. Live > non-live, regardless of age.
     today = datetime.now(JST).strftime("%Y-%m-%d")
     yesterday = (datetime.now(JST) - timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -135,10 +141,10 @@ def fetch_latest_live_video() -> dict | None:
 
     for bucket in (
         [v for v in candidates if v["published"] == today and is_live(v)],
-        [v for v in candidates if v["published"] == today],
         [v for v in candidates if v["published"] == yesterday and is_live(v)],
+        [v for v in candidates if is_live(v)],  # any recent live
+        [v for v in candidates if v["published"] == today],
         [v for v in candidates if v["published"] == yesterday],
-        [v for v in candidates if is_live(v)],
         candidates,
     ):
         if bucket:
