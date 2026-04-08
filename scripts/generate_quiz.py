@@ -28,7 +28,7 @@ from xml.etree import ElementTree as ET
 
 # ---------- Configuration ----------
 
-CHANNEL_ID = "UC23N4CK3fg30hJg9mqrDvKA"  # 両学長 リベラルアーツ大学
+CHANNEL_ID = "UC67Wr_9pA4I0glIxDt_Cpyw"  # 両学長 リベラルアーツ大学 (@ryogakucho)
 RSS_URL = f"https://www.youtube.com/feeds/videos.xml?channel_id={CHANNEL_ID}"
 OUTPUT_PATH = Path(__file__).resolve().parent.parent / "quiz-data.json"
 JST = timezone(timedelta(hours=9))
