@@ -88,8 +88,93 @@ def _published_to_jst_date(published: str) -> str:
         return published[:10]
 
 
+def fetch_latest_live_video_ytdlp() -> dict | None:
+    """Use yt-dlp to enumerate the channel's recent live streams.
+
+    YouTube returns HTTP 404 for the RSS feed when requested from GitHub
+    Actions runner IPs, so yt-dlp (with its built-in IP rotation logic
+    and proper YouTube client emulation) is used as the primary path.
+    """
+    try:
+        from yt_dlp import YoutubeDL  # type: ignore
+    except Exception as exc:
+        print(f"[YTDLP] import failed: {exc}", file=sys.stderr)
+        return None
+
+    candidates: list[dict] = []
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,
+        "playlistend": 15,
+        "skip_download": True,
+    }
+    for url in (
+        f"https://www.youtube.com/channel/{CHANNEL_ID}/streams",
+        f"https://www.youtube.com/channel/{CHANNEL_ID}/videos",
+    ):
+        try:
+            with YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as exc:
+            print(f"[YTDLP] {url} failed: {exc}", file=sys.stderr)
+            continue
+        for entry in (info or {}).get("entries", []) or []:
+            vid = entry.get("id")
+            title = entry.get("title") or ""
+            if not vid or not title:
+                continue
+            ts = entry.get("timestamp") or entry.get("release_timestamp")
+            if ts:
+                pub = datetime.fromtimestamp(ts, tz=JST).strftime("%Y-%m-%d")
+            else:
+                pub = entry.get("upload_date") or ""
+                if len(pub) == 8:
+                    pub = f"{pub[:4]}-{pub[4:6]}-{pub[6:]}"
+            candidates.append({
+                "video_id": vid,
+                "title": title.strip(),
+                "published": pub,
+                "description": "",
+            })
+        if candidates:
+            break
+
+    if not candidates:
+        return None
+
+    candidates = [
+        v for v in candidates
+        if "#shorts" not in v["title"].lower() and "#short" not in v["title"].lower()
+    ]
+    today = datetime.now(JST).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(JST) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    def is_live(v: dict) -> bool:
+        t = v["title"]
+        return any(k in t for k in ("ライブ", "live", "LIVE", "家計改善", "収入アップ"))
+
+    for bucket in (
+        [v for v in candidates if v["published"] == today and is_live(v)],
+        [v for v in candidates if v["published"] == yesterday and is_live(v)],
+        [v for v in candidates if is_live(v)],
+        [v for v in candidates if v["published"] == today],
+        [v for v in candidates if v["published"] == yesterday],
+        candidates,
+    ):
+        if bucket:
+            return bucket[0]
+    return None
+
+
 def fetch_latest_live_video() -> dict | None:
     """Return dict with video_id, title, published (JST YYYY-MM-DD), description."""
+    # Primary: yt-dlp (works from GH Actions runners)
+    via_ytdlp = fetch_latest_live_video_ytdlp()
+    if via_ytdlp:
+        return via_ytdlp
+
+    # Fallback: RSS feed (often 404s from datacenter IPs)
     try:
         data = http_get(RSS_URL)
     except Exception as exc:
