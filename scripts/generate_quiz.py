@@ -1,26 +1,28 @@
 #!/usr/bin/env python3
 """
-Daily リベ大 quiz generator (Q&A pair aware).
+Daily リベ大 quiz generator (Gemini-powered).
 
-Parses the video's chapter markers and understands the structure:
-  - Top-level chapter that ends with ? → a viewer's question
-  - Sub-chapter (starts with └ / ├ / │) → the answer or follow-up
-  - 🦁-prefixed chapter → 学長 himself answering / asserting
+Pipeline:
+  1. Pull the latest 両学長 live video from RSS (@ryogakucho).
+  2. Fetch the full video description (chapters + summary).
+  3. Fetch auto-captions from YouTube timedtext API when available.
+  4. Ask Gemini 2.5 Flash to synthesize 4 high-quality quiz questions
+     as structured JSON.
+  5. Validate the result and write ``quiz-data.json``.
 
-Builds quiz questions in the shape of "今日のライブで質問された ○○ に対する
-学長の答えは？" with other real answers as distractors.
+Only the Python standard library is used so the script runs on a
+stock GitHub Actions runner without any ``pip install`` step.
 """
 
 from __future__ import annotations
 
-import html
 import json
-import random
+import os
 import re
 import sys
+import urllib.parse
 import urllib.request
 import urllib.error
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -32,45 +34,23 @@ RSS_URL = f"https://www.youtube.com/feeds/videos.xml?channel_id={CHANNEL_ID}"
 OUTPUT_PATH = Path(__file__).resolve().parent.parent / "quiz-data.json"
 JST = timezone(timedelta(hours=9))
 
+GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GEMINI_MODEL}:generateContent"
+)
+
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
 
-# Pool of generic リベ大-themed distractors used when real answers run out.
-DISTRACTOR_POOL = [
-    "まず固定費を見直すのが先決",
-    "インデックス投資を淡々と積み立てる",
-    "米国株S&P500に一括投資する",
-    "新NISAの成長投資枠を活用する",
-    "iDeCoに掛金上限まで拠出する",
-    "ふるさと納税を上限まで使う",
-    "確定申告で所得を圧縮する",
-    "副業で収入の柱を増やす",
-    "ブログやせどりで稼ぐ力をつける",
-    "格安SIMに乗り換えて固定費カット",
-    "不要な生命保険を解約する",
-    "楽天経済圏でポイントを貯める",
-    "転職エージェントで年収アップを狙う",
-    "FIRE目標を逆算して積立額を決める",
-    "仮想通貨はリスクが高いから避ける",
-    "住宅ローンは無理せず繰り上げ返済",
-    "小規模企業共済で節税する",
-    "つみたてNISAから始める",
-    "高配当ETFで不労所得を作る",
-    "法人化して経費を計上する",
-    "貯金を先に確保してから投資",
-    "子ども名義で口座を作る",
-    "変額保険は手数料が高いので不要",
-    "銀行預金より国債を選ぶ",
-]
+
+# ---------- HTTP helpers ----------
 
 
-# ---------- HTTP ----------
-
-
-def http_get(url: str, timeout: int = 15) -> bytes:
+def http_get(url: str, timeout: int = 20) -> bytes:
     req = urllib.request.Request(
         url,
         headers={
@@ -80,6 +60,21 @@ def http_get(url: str, timeout: int = 15) -> bytes:
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
+
+
+def http_post_json(url: str, payload: dict, timeout: int = 60) -> dict:
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 # ---------- RSS ----------
@@ -161,7 +156,7 @@ def fetch_latest_live_video() -> dict | None:
     return None
 
 
-# ---------- Video page scraping fallback ----------
+# ---------- Full description & transcript ----------
 
 
 def fetch_video_description(video_id: str) -> str:
@@ -169,7 +164,7 @@ def fetch_video_description(video_id: str) -> str:
     try:
         raw = http_get(url).decode("utf-8", errors="replace")
     except Exception as exc:
-        print(f"[SCRAPE] fetch failed: {exc}", file=sys.stderr)
+        print(f"[DESC] fetch failed: {exc}", file=sys.stderr)
         return ""
     match = re.search(r'"shortDescription":"((?:\\.|[^"\\])*)"', raw)
     if not match:
@@ -181,477 +176,281 @@ def fetch_video_description(video_id: str) -> str:
         return escaped.encode().decode("unicode_escape", errors="replace")
 
 
-# ---------- Chapter parsing ----------
+def fetch_transcript(video_id: str) -> str:
+    """Best-effort: fetch Japanese auto-captions for the video.
 
+    Primary path: ``youtube-transcript-api`` (pip), which handles the
+    proof-of-origin token workarounds needed for ASR tracks on modern
+    YouTube.
 
-# Matches both tree markers and plain hyphen decorators used for sub-chapters.
-SUB_PREFIX_CHARS = "└├│┗┣┃-━─"
-LION_CHARS = "🦁"
-STRIP_DECOR = re.compile(r"[🦁📺✨🔥💡📚💰🎉🎯⭐️⭐🌟]")
-STRIP_BRACKETS = re.compile(r"【[^】]*】")
-TRIM_EDGES = re.compile(rf"^[{re.escape(SUB_PREFIX_CHARS)}\s〜～ー・➤►▶▼▲◎●○◆◇■□]+")
-TRAILING_NOISE = re.compile(r"（[^（）]*の続き）$|\([^\)]*の続き\)$|\[[^\]]+\]$")
-
-STOPWORD_TOPICS = {
-    "intro", "Intro", "INTRO", "オープニング", "opening", "Opening", "OP", "op",
-    "outro", "Outro", "エンディング", "ending", "Ending", "ED", "ed",
-}
-
-
-@dataclass
-class Chapter:
-    time: str
-    raw: str
-    title: str
-    is_sub: bool
-    is_question: bool
-    has_lion: bool
-
-
-@dataclass
-class ChapterGroup:
-    parent: Chapter
-    children: list[Chapter] = field(default_factory=list)
-
-
-def _clean(raw: str) -> tuple[str, bool, bool]:
-    """Return (clean_title, is_sub, has_lion) for a chapter line."""
-    is_sub = False
-    for ch in raw[:3]:
-        if ch in SUB_PREFIX_CHARS:
-            is_sub = True
-            break
-    has_lion = LION_CHARS in raw
-    s = raw
-    s = STRIP_DECOR.sub("", s)
-    s = STRIP_BRACKETS.sub("", s)
-    s = TRIM_EDGES.sub("", s)
-    s = TRAILING_NOISE.sub("", s).strip()
-    return s, is_sub, has_lion
-
-
-# Words that signal a viewer question even without a trailing ?
-QUESTION_SIGNALS = (
-    "悩んでいる", "悩んでます", "悩み", "困っている", "困ってます",
-    "教えて", "教えてください", "知りたい", "迷っている", "迷って",
-    "どう思いますか", "どうでしょうか", "どうすれば", "どうすべき",
-    "アドバイス", "意見を聞きたい", "見解", "ご意見",
-)
-
-
-def _is_question_like(title: str) -> bool:
-    s = title.rstrip()
-    if s.endswith(("？", "?")):
-        return True
-    return any(sig in s for sig in QUESTION_SIGNALS)
-
-
-def parse_chapters(description: str) -> list[Chapter]:
-    if not description:
-        return []
-    chapters: list[Chapter] = []
-    for line in description.splitlines():
-        m = re.match(r"^\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*(.+?)\s*$", line)
-        if not m:
-            continue
-        time_s = m.group(1)
-        raw = m.group(2)
-        title, is_sub, has_lion = _clean(raw)
-        if not title or title in STOPWORD_TOPICS:
-            continue
-        if not (5 <= len(title) <= 80):
-            continue
-        is_q = _is_question_like(title)
-        chapters.append(Chapter(
-            time=time_s,
-            raw=raw,
-            title=title,
-            is_sub=is_sub,
-            is_question=is_q,
-            has_lion=has_lion,
-        ))
-    return chapters
-
-
-def _title_overlap(a: str, b: str) -> int:
-    """Count how many 4-char sliding substrings of the shorter string appear in the longer."""
-    if len(a) < 4 or len(b) < 4:
-        return 0
-    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
-    hits = 0
-    for i in range(len(shorter) - 3):
-        if shorter[i:i + 4] in longer:
-            hits += 1
-    return hits
-
-
-def group_by_parent(chapters: list[Chapter]) -> list[ChapterGroup]:
-    """Group top-level chapters with their sub-chapters, preferring topic matches over sequential order."""
-    groups: list[ChapterGroup] = []
-    parent_idx_by_ch: dict[int, int] = {}
-
-    # First pass: build a group for each top-level chapter.
-    for ch in chapters:
-        if not ch.is_sub:
-            groups.append(ChapterGroup(parent=ch))
-
-    if not groups:
-        # Promote the first sub-chapter, if any, to a parent.
-        if chapters:
-            first = chapters[0]
-            promoted = Chapter(
-                time=first.time, raw=first.raw, title=first.title,
-                is_sub=False, is_question=first.is_question, has_lion=first.has_lion,
+    Fallback: scrape ``captionTracks`` from the watch page HTML
+    (works for videos with manual captions that don't need a PoT token).
+    """
+    # --- Primary: youtube-transcript-api ---
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi  # type: ignore
+        api = YouTubeTranscriptApi()
+        fetched = api.fetch(video_id, languages=["ja", "ja-JP", "en"])
+        segs = fetched.to_raw_data()
+        text = "\n".join(
+            (s.get("text") or "").replace("\n", " ").strip()
+            for s in segs
+            if (s.get("text") or "").strip()
+        )
+        if len(text) > 200:
+            print(
+                f"[CC] youtube-transcript-api ok, {len(segs)} segs, {len(text)} chars",
+                file=sys.stderr,
             )
-            groups.append(ChapterGroup(parent=promoted))
-        return groups
+            return text
+    except Exception as exc:
+        print(f"[CC] youtube-transcript-api failed: {exc}", file=sys.stderr)
 
-    # Second pass: assign each sub-chapter to the best-matching recent parent (by topic overlap).
-    last_parent_idx = 0
-    parent_index = {id(g.parent): i for i, g in enumerate(groups)}
-    for ch in chapters:
-        if not ch.is_sub:
-            last_parent_idx = parent_index.get(id(ch), last_parent_idx)
+    # --- Fallback: watch page captionTracks scrape ---
+    watch_url = f"https://www.youtube.com/watch?v={video_id}"
+    try:
+        html_raw = http_get(watch_url, timeout=20).decode("utf-8", errors="replace")
+    except Exception as exc:
+        print(f"[CC] watch page fetch failed: {exc}", file=sys.stderr)
+        return ""
+
+    m = re.search(r'"captionTracks":(\[.*?\])', html_raw)
+    if not m:
+        print("[CC] no captionTracks found on watch page", file=sys.stderr)
+        return ""
+
+    tracks_json = m.group(1)
+    try:
+        # baseUrl etc. come escaped (\u0026, \/) — use json.loads to normalize.
+        tracks = json.loads(tracks_json)
+    except json.JSONDecodeError as exc:
+        print(f"[CC] captionTracks JSON parse failed: {exc}", file=sys.stderr)
+        return ""
+
+    def _score(t: dict) -> int:
+        lang = (t.get("languageCode") or "").lower()
+        kind = (t.get("kind") or "").lower()
+        score = 0
+        if lang.startswith("ja"):
+            score += 100
+        if kind != "asr":
+            # Prefer manual captions over asr when both exist
+            score += 10
+        return score
+
+    tracks_sorted = sorted(tracks, key=_score, reverse=True)
+    for t in tracks_sorted:
+        base_url = t.get("baseUrl") or ""
+        if not base_url:
             continue
-        # Consider the last 3 parents (including current) and pick the best topic overlap.
-        best_idx = last_parent_idx
-        best_score = 0
-        for j in range(max(0, last_parent_idx - 2), last_parent_idx + 1):
-            score = _title_overlap(ch.title, groups[j].parent.title)
-            if score > best_score:
-                best_score = score
-                best_idx = j
-        # Require a meaningful overlap to reassign; otherwise default to the most recent.
-        if best_score >= 2:
-            groups[best_idx].children.append(ch)
-        else:
-            groups[last_parent_idx].children.append(ch)
-
-    return groups
-
-
-# ---------- Text helpers ----------
-
-
-_NORM = re.compile(r"[\s、。！？!?・「」『』【】\-ー]")
-
-
-def _norm(s: str) -> str:
-    return _NORM.sub("", s).lower()
-
-
-def _too_similar(a: str, b: str) -> bool:
-    na, nb = _norm(a), _norm(b)
-    if not na or not nb:
-        return False
-    if na == nb:
-        return True
-    shorter, longer = (na, nb) if len(na) <= len(nb) else (nb, na)
-    if len(shorter) >= 5 and shorter in longer:
-        return True
-    common = 0
-    for x, y in zip(na, nb):
-        if x == y:
-            common += 1
-        else:
-            break
-    if common >= 8 and common >= min(len(na), len(nb)) * 0.7:
-        return True
-    return False
-
-
-def shorten_question(text: str, max_len: int = 38) -> str:
-    """Shorten a verbose viewer question to a tappable size."""
-    s = text.strip()
-    s = re.sub(r"^[「『]", "", s)
-    s = re.sub(r"[」』]$", "", s)
-    s = s.rstrip("？?。、.")
-    # Cut at the first major punctuation after ~12 chars
-    for sep in ("。", "、", "．", ",", "，"):
-        idx = s.find(sep)
-        if 12 <= idx <= max_len:
-            return s[:idx].strip()
-    if len(s) <= max_len:
-        return s
-    return s[:max_len].rstrip() + "…"
-
-
-# ---------- Question generators ----------
-
-
-QUESTION_TEMPLATES_QA = [
-    '今日のライブで\n「{q}」\nという質問への学長の答えは？',
-    '今日のライブで出た\n「{q}」という相談に\n学長はどう答えた？',
-    '今日のライブの\n「{q}」の\n学長の回答は？',
-]
-
-QUESTION_TEMPLATES_STATEMENT = [
-    '今日のライブで学長が\n「{q}」について\n語った内容は？',
-    '今日のライブで学長が\n強調していたのは？',
-    '今日のライブで学長が\n主張していたのは？',
-]
-
-EXPLANATION_QA = [
-    '正解は「{a}」📚\n実際のライブで学長がそう答えていました✨',
-    '正解は「{a}」🦁\nライブで学長がしっかり解説してましたね💡',
-    '正解は「{a}」🔥\n見逃した方はアーカイブで要チェック！',
-]
-
-
-def _choose_answer_from_children(children: list[Chapter]) -> Chapter | None:
-    """Pick the child that most likely contains 学長's answer. Never use a question as an answer."""
-    if not children:
-        return None
-    lion = [c for c in children if c.has_lion and not c.is_question]
-    if lion:
-        return lion[0]
-    non_q = [c for c in children if not c.is_question]
-    if non_q:
-        return non_q[0]
-    return None  # We refuse to treat another viewer question as an answer.
-
-
-def _collect_distractor_answers(all_groups: list[ChapterGroup], exclude_group: ChapterGroup) -> list[str]:
-    """Gather realistic wrong answers: non-question children from OTHER groups."""
-    results: list[str] = []
-    for g in all_groups:
-        if g is exclude_group:
+        # Raw JSON may still contain \u0026; json.loads already decoded it.
+        try:
+            raw = http_get(base_url, timeout=30).decode("utf-8", errors="replace")
+        except Exception as exc:
+            print(f"[CC] baseUrl fetch failed: {exc}", file=sys.stderr)
             continue
-        for c in g.children:
-            if not c.is_question and 6 <= len(c.title) <= 34:
-                results.append(c.title)
-        # A 🦁-marked parent is also an assertion we can reuse
-        if g.parent.has_lion and not g.parent.is_question and 6 <= len(g.parent.title) <= 34:
-            results.append(g.parent.title)
-    return results
-
-
-def build_qa_question(group: ChapterGroup, all_groups: list[ChapterGroup]) -> dict | None:
-    """Build a question where the parent is a viewer question and children contain the answer."""
-    if not group.parent.is_question:
-        return None
-    answer_ch = _choose_answer_from_children(group.children)
-    if answer_ch is None:
-        return None
-    correct = answer_ch.title.rstrip("？?")
-    # Reject answers that are too short or too long to make a clean 4-choice question.
-    if not (6 <= len(correct) <= 34):
-        return None
-    # Sanity check: the answer must share keywords with the parent question.
-    # This prevents wrongly-grouped children from polluting the QA.
-    if _title_overlap(group.parent.title, correct) == 0:
-        return None
-
-    short_q = shorten_question(group.parent.title)
-    stem = random.choice(QUESTION_TEMPLATES_QA).format(q=short_q)
-
-    # Distractor pool: (a) other groups' real answers (b) generic pool
-    real_others = _collect_distractor_answers(all_groups, exclude_group=group)
-    random.shuffle(real_others)
-
-    distractors: list[str] = []
-    for t in real_others:
-        if len(distractors) >= 2:
-            break
-        if _too_similar(t, correct):
+        if not raw.strip():
             continue
-        if any(_too_similar(t, d) for d in distractors):
-            continue
-        distractors.append(t.rstrip("？?"))
-
-    pool = DISTRACTOR_POOL[:]
-    random.shuffle(pool)
-    for t in pool:
-        if len(distractors) >= 3:
-            break
-        if _too_similar(t, correct):
-            continue
-        if any(_too_similar(t, d) for d in distractors):
-            continue
-        distractors.append(t)
-
-    if len(distractors) < 3:
-        return None
-
-    correct_idx = random.randint(0, 3)
-    choices = list(distractors)
-    choices.insert(correct_idx, correct)
-
-    return {
-        "question": stem,
-        "choices": choices,
-        "correctIndex": correct_idx,
-        "explanation": random.choice(EXPLANATION_QA).format(a=correct),
-        "_source_time": group.parent.time,
-        "_source_kind": "qa",
-    }
+        text = _extract_transcript_text(raw)
+        if len(text) > 200:
+            lang = t.get("languageCode", "?")
+            kind = t.get("kind", "manual")
+            print(f"[CC] using {lang}/{kind}, {len(text)} chars", file=sys.stderr)
+            return text
+    return ""
 
 
-def build_statement_question(group: ChapterGroup, all_groups: list[ChapterGroup]) -> dict | None:
-    """Build a question around a 学長 statement (🦁 parent, non-question)."""
-    if not group.parent.has_lion or group.parent.is_question:
-        return None
-    correct = group.parent.title.rstrip("？?")
-    if not (6 <= len(correct) <= 34):
-        return None
-
-    # Variety: pick a non-parametric template at random
-    stem = random.choice([
-        '今日のライブで学長が\n強調していたのは？',
-        '今日のライブで学長が\n主張していたのは？',
-        '今日のライブで学長が\n伝えていたのは？',
-    ])
-
-    real_others = _collect_distractor_answers(all_groups, exclude_group=group)
-    random.shuffle(real_others)
-
-    distractors: list[str] = []
-    for t in real_others:
-        if len(distractors) >= 2:
-            break
-        if _too_similar(t, correct):
-            continue
-        if any(_too_similar(t, d) for d in distractors):
-            continue
-        distractors.append(t.rstrip("？?"))
-
-    pool = DISTRACTOR_POOL[:]
-    random.shuffle(pool)
-    for t in pool:
-        if len(distractors) >= 3:
-            break
-        if _too_similar(t, correct):
-            continue
-        if any(_too_similar(t, d) for d in distractors):
-            continue
-        distractors.append(t)
-
-    if len(distractors) < 3:
-        return None
-
-    correct_idx = random.randint(0, 3)
-    choices = list(distractors)
-    choices.insert(correct_idx, correct)
-
-    return {
-        "question": stem,
-        "choices": choices,
-        "correctIndex": correct_idx,
-        "explanation": random.choice(EXPLANATION_QA).format(a=correct),
-        "_source_time": group.parent.time,
-        "_source_kind": "statement",
-    }
+def _extract_transcript_text(raw: str) -> str:
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        return ""
+    parts: list[str] = []
+    for el in root.iter():
+        if el.tag.endswith("text") and el.text:
+            t = el.text.replace("\n", " ").strip()
+            t = re.sub(r"&#39;", "'", t)
+            t = re.sub(r"&amp;", "&", t)
+            t = re.sub(r"&quot;", '"', t)
+            t = re.sub(r"<[^>]+>", "", t)
+            if t:
+                parts.append(t)
+    return "\n".join(parts)
 
 
-def build_topic_question(chapter: Chapter, all_chapters: list[Chapter]) -> dict | None:
-    """Generic fallback: 'which of these topics was discussed today?'"""
-    correct = chapter.title.rstrip("？?")
-    if not (6 <= len(correct) <= 34):
-        return None
+# ---------- Gemini ----------
 
-    others = [
-        c.title.rstrip("？?")
-        for c in all_chapters
-        if c is not chapter and 6 <= len(c.title) <= 34
+
+GEMINI_SYSTEM_PROMPT = """\
+あなたは「両学長のリベラルアーツ大学」の熱心なファンで、配信内容から
+クオリティの高い4択クイズを作る日本語の編集者です。
+
+【目的】
+指定された「本日の両学長ライブ配信」の動画タイトル・概要欄（チャプター付き）
+・字幕テキスト（ある場合）を読み、リベ大ファンが楽しめる4問のクイズを作ります。
+
+【厳守ルール】
+1. **必ずその配信の内容に即した問題**にすること。配信で明確に語られた
+   話題・質問・学長の回答・数値・固有名詞を根拠にする。
+2. 問題文は「視聴者のお悩み相談」「学長の主張」「配信中の具体的エピソード」
+   「配信中に出た数字や固有名詞」など多様に。ワンパターン禁止。
+3. 選択肢は必ず4つ。正解はそのうち1つ。ダミー3つは**配信内容から見て
+   それっぽいけど間違い**にすること（リベ大頻出テーマ：節税、固定費、
+   iDeCo、NISA、高配当株、ふるさと納税、副業、転職、保険解約など）。
+4. 正解位置はランダムに散らす。全問同じ位置はNG。
+5. 問題文と選択肢はスマホで読みやすいように短く（選択肢は6〜34文字目安）。
+6. 問題文の途中改行は "\\n"（バックスラッシュ n）を含める。
+7. 解説は1〜2行で、なぜそれが正解かを配信内容に触れて説明する。絵文字1〜2個OK。
+8. 配信内容に明確な根拠がない話題は問題にしないこと（ハルシネーション禁止）。
+
+【出力形式】
+以下のJSONだけを返してください。マークダウンのコードブロックや前後の
+説明文は一切不要です。
+
+{
+  "questions": [
+    {
+      "question": "問題文（必要なら \\n で改行）",
+      "choices": ["選択肢1", "選択肢2", "選択肢3", "選択肢4"],
+      "correctIndex": 0,
+      "explanation": "正解の根拠を1〜2行で"
+    },
+    ... 合計4問 ...
+  ]
+}
+"""
+
+
+def _build_user_prompt(video: dict, description: str, transcript: str) -> str:
+    today_label = datetime.now(JST).strftime("%Y年%m月%d日")
+    lines = [
+        f"【日付】{today_label}",
+        f"【動画タイトル】{video['title']}",
+        f"【動画URL】https://www.youtube.com/watch?v={video['video_id']}",
+        "",
+        "【概要欄（チャプター付き）】",
+        description.strip(),
     ]
-    random.shuffle(others)
+    if transcript:
+        # Keep transcript modest; 16k chars ≈ enough context for gemini-2.5-flash
+        snippet = transcript.strip()
+        if len(snippet) > 16000:
+            snippet = snippet[:16000] + "…（以下省略）"
+        lines += ["", "【自動字幕（抜粋）】", snippet]
+    lines += [
+        "",
+        "上記の配信内容に基づいて、ルールに従って4問のクイズをJSONで返してください。",
+    ]
+    return "\n".join(lines)
 
-    distractors: list[str] = []
-    for t in others:
-        if len(distractors) >= 2:
-            break
-        if _too_similar(t, correct):
-            continue
-        if any(_too_similar(t, d) for d in distractors):
-            continue
-        distractors.append(t)
 
-    pool = DISTRACTOR_POOL[:]
-    random.shuffle(pool)
-    for t in pool:
-        if len(distractors) >= 3:
-            break
-        if _too_similar(t, correct):
-            continue
-        if any(_too_similar(t, d) for d in distractors):
-            continue
-        distractors.append(t)
+def call_gemini(video: dict, description: str, transcript: str) -> list[dict]:
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set")
 
-    if len(distractors) < 3:
-        return None
-
-    correct_idx = random.randint(0, 3)
-    choices = list(distractors)
-    choices.insert(correct_idx, correct)
-
-    return {
-        "question": "今日のライブで\n実際に話題になったのはどれ？",
-        "choices": choices,
-        "correctIndex": correct_idx,
-        "explanation": f"正解は「{correct}」💡\n今日のライブで取り上げられました📺",
-        "_source_time": chapter.time,
-        "_source_kind": "topic",
+    user_prompt = _build_user_prompt(video, description, transcript)
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": user_prompt}],
+            }
+        ],
+        "systemInstruction": {
+            "parts": [{"text": GEMINI_SYSTEM_PROMPT}],
+        },
+        "generationConfig": {
+            "temperature": 0.4,
+            "topP": 0.9,
+            "maxOutputTokens": 8192,
+            "responseMimeType": "application/json",
+        },
     }
-
-
-def generate_questions(chapters: list[Chapter]) -> list[dict]:
-    groups = group_by_parent(chapters)
-
-    questions: list[dict] = []
-    used_correct: list[str] = []
-
-    # Priority 1: Q&A groups (viewer question + answer)
-    qa_groups = [g for g in groups if g.parent.is_question and g.children]
-    random.shuffle(qa_groups)
-    for g in qa_groups:
-        if len(questions) >= 4:
+    url = f"{GEMINI_URL}?key={api_key}"
+    import time
+    last_err: Exception | None = None
+    resp: dict | None = None
+    for attempt in range(5):
+        try:
+            resp = http_post_json(url, payload, timeout=90)
             break
-        q = build_qa_question(g, groups)
-        if not q:
-            continue
-        correct = q["choices"][q["correctIndex"]]
-        if any(_too_similar(correct, u) for u in used_correct):
-            continue
-        questions.append(q)
-        used_correct.append(correct)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            last_err = RuntimeError(f"Gemini HTTP {e.code}: {body[:500]}")
+            # 429 (quota) / 500 / 503 are worth retrying; 4xx auth errors are not
+            if e.code in (429, 500, 502, 503, 504):
+                wait = 5 * (attempt + 1)
+                print(
+                    f"[Gemini] HTTP {e.code}, retry {attempt + 1}/5 in {wait}s",
+                    file=sys.stderr,
+                )
+                time.sleep(wait)
+                continue
+            raise last_err from e
+        except Exception as e:
+            last_err = e
+            wait = 5 * (attempt + 1)
+            print(f"[Gemini] {e}, retry {attempt + 1}/5 in {wait}s", file=sys.stderr)
+            time.sleep(wait)
+    if resp is None:
+        raise last_err or RuntimeError("Gemini: unknown failure after retries")
 
-    # Priority 2: 🦁 statement groups
-    if len(questions) < 4:
-        stmt_groups = [g for g in groups if g.parent.has_lion and not g.parent.is_question]
-        random.shuffle(stmt_groups)
-        for g in stmt_groups:
-            if len(questions) >= 4:
-                break
-            q = build_statement_question(g, groups)
-            if not q:
-                continue
-            correct = q["choices"][q["correctIndex"]]
-            if any(_too_similar(correct, u) for u in used_correct):
-                continue
-            questions.append(q)
-            used_correct.append(correct)
+    cands = resp.get("candidates") or []
+    if not cands:
+        raise RuntimeError(f"Gemini empty candidates: {json.dumps(resp)[:500]}")
+    parts = cands[0].get("content", {}).get("parts") or []
+    text = "".join(p.get("text", "") for p in parts).strip()
+    if not text:
+        raise RuntimeError(f"Gemini empty text: {json.dumps(resp)[:500]}")
 
-    # Priority 3: plain topic questions
-    if len(questions) < 4:
-        topic_chapters = [c for c in chapters if not c.is_sub and len(c.title) >= 8]
-        random.shuffle(topic_chapters)
-        for c in topic_chapters:
-            if len(questions) >= 4:
-                break
-            q = build_topic_question(c, chapters)
-            if not q:
-                continue
-            correct = q["choices"][q["correctIndex"]]
-            if any(_too_similar(correct, u) for u in used_correct):
-                continue
-            questions.append(q)
-            used_correct.append(correct)
+    # Gemini should have honored responseMimeType and returned pure JSON.
+    # Fall back to extracting a JSON object if wrapped in prose.
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", text, re.S)
+        if not m:
+            raise RuntimeError(f"Gemini non-JSON response: {text[:300]}")
+        data = json.loads(m.group(0))
 
-    # Strip internal bookkeeping fields
-    for q in questions:
-        q.pop("_source_time", None)
-        q.pop("_source_kind", None)
-    return questions[:4]
+    questions = data.get("questions") if isinstance(data, dict) else None
+    if not isinstance(questions, list):
+        raise RuntimeError(f"Gemini response has no 'questions' list: {text[:300]}")
+    return questions
+
+
+# ---------- Validation ----------
+
+
+def validate_questions(raw: list[dict]) -> list[dict]:
+    cleaned: list[dict] = []
+    for i, q in enumerate(raw[:4]):
+        if not isinstance(q, dict):
+            raise RuntimeError(f"Q{i} is not an object")
+        stem = q.get("question")
+        choices = q.get("choices")
+        correct = q.get("correctIndex")
+        explanation = q.get("explanation")
+        if not isinstance(stem, str) or not stem.strip():
+            raise RuntimeError(f"Q{i} has empty question")
+        if not isinstance(choices, list) or len(choices) != 4:
+            raise RuntimeError(f"Q{i} must have exactly 4 choices, got {choices}")
+        if not all(isinstance(c, str) and c.strip() for c in choices):
+            raise RuntimeError(f"Q{i} choices contain empty values")
+        if not isinstance(correct, int) or not (0 <= correct <= 3):
+            raise RuntimeError(f"Q{i} correctIndex invalid: {correct}")
+        if not isinstance(explanation, str) or not explanation.strip():
+            explanation = f"正解は「{choices[correct]}」"
+        cleaned.append({
+            "question": stem.strip(),
+            "choices": [c.strip() for c in choices],
+            "correctIndex": correct,
+            "explanation": explanation.strip(),
+        })
+    if len(cleaned) != 4:
+        raise RuntimeError(f"expected 4 questions, got {len(cleaned)}")
+    return cleaned
 
 
 # ---------- Main ----------
@@ -665,7 +464,7 @@ def main() -> int:
     print(f"[INFO] Target video: {video['title']} ({video['published']})")
 
     description = video.get("description") or ""
-    if len(description) < 100:
+    if len(description) < 200:
         scraped = fetch_video_description(video["video_id"])
         if scraped and len(scraped) > len(description):
             description = scraped
@@ -674,16 +473,11 @@ def main() -> int:
         return 1
     print(f"[INFO] Description length: {len(description)} chars")
 
-    chapters = parse_chapters(description)
-    print(f"[INFO] Parsed {len(chapters)} chapters ({sum(1 for c in chapters if c.is_sub)} sub, {sum(1 for c in chapters if c.is_question)} questions)")
-    if len(chapters) < 4:
-        print(f"[FATAL] not enough chapters: {len(chapters)}", file=sys.stderr)
-        return 1
+    transcript = fetch_transcript(video["video_id"])
+    print(f"[INFO] Transcript length: {len(transcript)} chars")
 
-    questions = generate_questions(chapters)
-    if len(questions) != 4:
-        print(f"[FATAL] generated {len(questions)} questions, expected 4", file=sys.stderr)
-        return 1
+    questions_raw = call_gemini(video, description, transcript)
+    questions = validate_questions(questions_raw)
 
     today = datetime.now(JST)
     today_str = today.strftime("%Y-%m-%d")
@@ -698,11 +492,6 @@ def main() -> int:
         except Exception:
             date_label = "最新"
 
-    # Replace "今日" in stems with the resolved label for clarity.
-    if date_label != "今日":
-        for q in questions:
-            q["question"] = q["question"].replace("今日のライブ", f"{date_label}のライブ")
-
     payload = {
         "date": today_str,
         "dateLabel": date_label,
@@ -710,7 +499,7 @@ def main() -> int:
         "videoUrl": f"https://www.youtube.com/watch?v={video['video_id']}",
         "videoTitle": video["title"],
         "generatedAt": today.isoformat(timespec="seconds"),
-        "generatedBy": "github-actions",
+        "generatedBy": "github-actions (gemini-2.5-flash)",
         "questions": questions,
     }
 
