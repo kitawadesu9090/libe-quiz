@@ -244,8 +244,38 @@ def fetch_latest_live_video() -> dict | None:
 # ---------- Full description & transcript ----------
 
 
+def fetch_video_description_api(video_id: str) -> str:
+    """YouTube Data API v3 で概要欄を取得（データセンターIPでもブロックされない）。"""
+    api_key = os.environ.get("YOUTUBE_API_KEY", "").strip()
+    if not api_key:
+        print("[DESC] YOUTUBE_API_KEY not set, skipping API", file=sys.stderr)
+        return ""
+    url = (
+        f"https://www.googleapis.com/youtube/v3/videos"
+        f"?part=snippet&id={video_id}&key={api_key}"
+    )
+    try:
+        raw = http_get(url, timeout=15)
+        data = json.loads(raw.decode("utf-8"))
+        items = data.get("items") or []
+        if items:
+            desc = items[0].get("snippet", {}).get("description", "")
+            if desc:
+                print(f"[DESC] YouTube API ok, {len(desc)} chars", file=sys.stderr)
+                return desc
+        print("[DESC] YouTube API returned no description", file=sys.stderr)
+    except Exception as exc:
+        print(f"[DESC] YouTube API failed: {exc}", file=sys.stderr)
+    return ""
+
+
 def fetch_video_description(video_id: str) -> str:
-    # Primary: yt-dlp full extraction (works from GH Actions IPs)
+    # Primary: YouTube Data API v3 (reliable from datacenter IPs)
+    api_desc = fetch_video_description_api(video_id)
+    if api_desc:
+        return api_desc
+
+    # Secondary: yt-dlp full extraction
     try:
         from yt_dlp import YoutubeDL  # type: ignore
         with YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as ydl:
@@ -276,17 +306,81 @@ def fetch_video_description(video_id: str) -> str:
         return escaped.encode().decode("unicode_escape", errors="replace")
 
 
+def _fetch_transcript_innertube(video_id: str) -> str:
+    """Innertube API (youtubei/v1/player) で字幕URLを取得し、テキストを返す。
+
+    認証不要でデータセンターIPからもアクセス可能。
+    """
+    innertube_url = "https://www.youtube.com/youtubei/v1/player"
+    payload = {
+        "context": {
+            "client": {
+                "clientName": "WEB",
+                "clientVersion": "2.20240101.00.00",
+                "hl": "ja",
+                "gl": "JP",
+            }
+        },
+        "videoId": video_id,
+    }
+    try:
+        resp = http_post_json(innertube_url, payload, timeout=20)
+    except Exception as exc:
+        print(f"[CC] Innertube player request failed: {exc}", file=sys.stderr)
+        return ""
+
+    captions = resp.get("captions", {}).get("playerCaptionsTracklistRenderer", {})
+    tracks = captions.get("captionTracks") or []
+    if not tracks:
+        print("[CC] Innertube: no captionTracks", file=sys.stderr)
+        return ""
+
+    # 日本語を優先、手動字幕 > ASR
+    def _score(t: dict) -> int:
+        lang = (t.get("languageCode") or "").lower()
+        kind = (t.get("kind") or "").lower()
+        s = 0
+        if lang.startswith("ja"):
+            s += 100
+        if kind != "asr":
+            s += 10
+        return s
+
+    tracks_sorted = sorted(tracks, key=_score, reverse=True)
+    for t in tracks_sorted:
+        base_url = t.get("baseUrl") or ""
+        if not base_url:
+            continue
+        try:
+            raw = http_get(base_url, timeout=30).decode("utf-8", errors="replace")
+        except Exception as exc:
+            print(f"[CC] Innertube caption fetch failed: {exc}", file=sys.stderr)
+            continue
+        text = _extract_transcript_text(raw)
+        if len(text) > 200:
+            lang = t.get("languageCode", "?")
+            kind = t.get("kind") or "manual"
+            print(f"[CC] Innertube {lang}/{kind}, {len(text)} chars", file=sys.stderr)
+            return text
+    print("[CC] Innertube: no usable caption text", file=sys.stderr)
+    return ""
+
+
 def fetch_transcript(video_id: str) -> str:
     """Best-effort: fetch Japanese auto-captions for the video.
 
-    Primary path: ``youtube-transcript-api`` (pip), which handles the
-    proof-of-origin token workarounds needed for ASR tracks on modern
-    YouTube.
-
-    Fallback: scrape ``captionTracks`` from the watch page HTML
-    (works for videos with manual captions that don't need a PoT token).
+    Priority:
+      1. Innertube API (no auth needed, datacenter-friendly)
+      2. yt-dlp subtitle download
+      3. youtube-transcript-api
+      4. watch page captionTracks scrape
     """
-    # --- Primary: yt-dlp subtitle download (works from GH Actions IPs) ---
+    # --- Primary: Innertube API ---
+    innertube_text = _fetch_transcript_innertube(video_id)
+    if innertube_text:
+        return innertube_text
+
+    # --- Secondary: yt-dlp subtitle download ---
     try:
         from yt_dlp import YoutubeDL  # type: ignore
         opts = {
