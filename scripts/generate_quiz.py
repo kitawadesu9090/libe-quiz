@@ -34,7 +34,7 @@ RSS_URL = f"https://www.youtube.com/feeds/videos.xml?channel_id={CHANNEL_ID}"
 OUTPUT_PATH = Path(__file__).resolve().parent.parent / "quiz-data.json"
 JST = timezone(timedelta(hours=9))
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
 GEMINI_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/models/"
     f"{GEMINI_MODEL}:generateContent"
