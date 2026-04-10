@@ -141,24 +141,40 @@ def fetch_latest_live_video_api() -> dict | None:
         if "#shorts" not in v["title"].lower() and "#short" not in v["title"].lower()
     ]
 
-    today = datetime.now(JST).strftime("%Y-%m-%d")
-    yesterday = (datetime.now(JST) - timedelta(days=1)).strftime("%Y-%m-%d")
+    now_jst = datetime.now(JST)
+    today = now_jst.strftime("%Y-%m-%d")
+    yesterday = (now_jst - timedelta(days=1)).strftime("%Y-%m-%d")
+    # Live streams typically end around 8:30-9:00 JST. Before 9:00 JST,
+    # today's live is likely still ongoing, so prefer yesterday's live.
+    prefer_yesterday = now_jst.hour < 9
 
     def is_live(v: dict) -> bool:
         t = v["title"]
         return any(k in t for k in ("ライブ", "live", "LIVE", "家計改善", "収入アップ"))
 
-    for bucket in (
-        [v for v in candidates if v["published"] == today and is_live(v)],
-        [v for v in candidates if v["published"] == yesterday and is_live(v)],
-        [v for v in candidates if is_live(v)],
-        [v for v in candidates if v["published"] == today],
-        [v for v in candidates if v["published"] == yesterday],
-        candidates,
-    ):
+    if prefer_yesterday:
+        priority = (
+            [v for v in candidates if v["published"] == yesterday and is_live(v)],
+            [v for v in candidates if v["published"] == today and is_live(v)],
+            [v for v in candidates if is_live(v)],
+            [v for v in candidates if v["published"] == yesterday],
+            [v for v in candidates if v["published"] == today],
+            candidates,
+        )
+    else:
+        priority = (
+            [v for v in candidates if v["published"] == today and is_live(v)],
+            [v for v in candidates if v["published"] == yesterday and is_live(v)],
+            [v for v in candidates if is_live(v)],
+            [v for v in candidates if v["published"] == today],
+            [v for v in candidates if v["published"] == yesterday],
+            candidates,
+        )
+
+    for bucket in priority:
         if bucket:
             picked = bucket[0]
-            print(f"[SEARCH] YouTube API picked {picked['video_id']} ({picked['published']})", file=sys.stderr)
+            print(f"[SEARCH] YouTube API picked {picked['video_id']} ({picked['published']}, prefer_yesterday={prefer_yesterday})", file=sys.stderr)
             return picked
     return None
 
