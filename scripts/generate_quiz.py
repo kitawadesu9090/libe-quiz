@@ -245,6 +245,21 @@ def fetch_latest_live_video() -> dict | None:
 
 
 def fetch_video_description(video_id: str) -> str:
+    # Primary: yt-dlp full extraction (works from GH Actions IPs)
+    try:
+        from yt_dlp import YoutubeDL  # type: ignore
+        with YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as ydl:
+            info = ydl.extract_info(
+                f"https://www.youtube.com/watch?v={video_id}", download=False
+            )
+        desc = (info or {}).get("description") or ""
+        if desc:
+            print(f"[DESC] yt-dlp ok, {len(desc)} chars", file=sys.stderr)
+            return desc
+    except Exception as exc:
+        print(f"[DESC] yt-dlp failed: {exc}", file=sys.stderr)
+
+    # Fallback: scrape watch page HTML
     url = f"https://www.youtube.com/watch?v={video_id}"
     try:
         raw = http_get(url).decode("utf-8", errors="replace")
@@ -271,7 +286,57 @@ def fetch_transcript(video_id: str) -> str:
     Fallback: scrape ``captionTracks`` from the watch page HTML
     (works for videos with manual captions that don't need a PoT token).
     """
-    # --- Primary: youtube-transcript-api ---
+    # --- Primary: yt-dlp subtitle download (works from GH Actions IPs) ---
+    try:
+        from yt_dlp import YoutubeDL  # type: ignore
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": ["ja", "ja-JP", "en"],
+            "subtitlesformat": "vtt",
+        }
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(
+                f"https://www.youtube.com/watch?v={video_id}", download=False
+            )
+        subs = (info or {}).get("subtitles") or {}
+        autos = (info or {}).get("automatic_captions") or {}
+        for src in (subs, autos):
+            for lang in ("ja", "ja-JP", "ja-orig", "en"):
+                tracks = src.get(lang) or []
+                for tr in tracks:
+                    url = tr.get("url")
+                    if not url:
+                        continue
+                    try:
+                        raw = http_get(url, timeout=30).decode("utf-8", errors="replace")
+                    except Exception:
+                        continue
+                    # VTT or XML; reuse existing extractor for XML, simple parse for VTT
+                    if "<text" in raw or raw.startswith("<?xml"):
+                        text = _extract_transcript_text(raw)
+                    else:
+                        # VTT: drop timestamps + WEBVTT header
+                        lines = []
+                        for ln in raw.splitlines():
+                            ln = ln.strip()
+                            if not ln or ln.startswith("WEBVTT") or "-->" in ln or ln.isdigit():
+                                continue
+                            lines.append(re.sub(r"<[^>]+>", "", ln))
+                        text = "\n".join(lines)
+                    if len(text) > 200:
+                        print(
+                            f"[CC] yt-dlp {lang}, {len(text)} chars",
+                            file=sys.stderr,
+                        )
+                        return text
+    except Exception as exc:
+        print(f"[CC] yt-dlp subtitle failed: {exc}", file=sys.stderr)
+
+    # --- Secondary: youtube-transcript-api ---
     try:
         from youtube_transcript_api import YouTubeTranscriptApi  # type: ignore
         api = YouTubeTranscriptApi()
@@ -374,7 +439,7 @@ GEMINI_SYSTEM_PROMPT = """\
 指定された「本日の両学長ライブ配信」の動画タイトル・概要欄（チャプター付き）
 ・字幕テキスト（ある場合）を読み、リベ大ファンが楽しめる4問のクイズを作ります。
 
-【厳守ルール】
+【厺守ルール】
 1. **必ずその配信の内容に即した問題**にすること。配信で明確に語られた
    話題・質問・学長の回答・数値・固有名詞を根拠にする。
 2. 問題文は「視聴者のお悩み相談」「学長の主張」「配信中の具体的エピソード」
@@ -386,7 +451,7 @@ GEMINI_SYSTEM_PROMPT = """\
 5. 問題文と選択肢はスマホで読みやすいように短く（選択肢は6〜34文字目安）。
 6. 問題文の途中改行は "\\n"（バックスラッシュ n）を含める。
 7. 解説は1〜2行で、なぜそれが正解かを配信内容に触れて説明する。絵文字1〜2個OK。
-8. 配信内容に明確な根拠がない話題は問題にしないこと（ハルシネーション禁止）。
+8. 配信内容に明確な根拠がない話題は問題にしないこな（ハルシネーション禁止）。
 
 【出力形式】
 以下のJSONだけを返してください。マークダウンのコードブロックや前後の
@@ -554,8 +619,8 @@ def main() -> int:
         if scraped and len(scraped) > len(description):
             description = scraped
     if not description:
-        print("[FATAL] description not found", file=sys.stderr)
-        return 1
+        print("[WARN] description not found, proceeding with title only", file=sys.stderr)
+        description = video["title"]
     print(f"[INFO] Description length: {len(description)} chars")
 
     transcript = fetch_transcript(video["video_id"])
