@@ -88,6 +88,81 @@ def _published_to_jst_date(published: str) -> str:
         return published[:10]
 
 
+def fetch_latest_live_video_api() -> dict | None:
+    """YouTube Data API v3 search で最新のライブ配信動画を取得。
+
+    yt-dlp はデータセンターIPで古い動画を拾ってしまうことがあるため、
+    正規APIで確実に最新動画を取得する。
+    """
+    api_key = os.environ.get("YOUTUBE_API_KEY", "").strip()
+    if not api_key:
+        print("[SEARCH] YOUTUBE_API_KEY not set, skipping API search", file=sys.stderr)
+        return None
+
+    url = (
+        "https://www.googleapis.com/youtube/v3/search"
+        f"?part=snippet&channelId={CHANNEL_ID}"
+        "&order=date&maxResults=15&type=video"
+        f"&key={api_key}"
+    )
+    try:
+        raw = http_get(url, timeout=15)
+        data = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        print(f"[SEARCH] YouTube API search failed: {exc}", file=sys.stderr)
+        return None
+
+    items = data.get("items") or []
+    if not items:
+        print("[SEARCH] YouTube API returned no items", file=sys.stderr)
+        return None
+
+    candidates: list[dict] = []
+    for item in items:
+        snip = item.get("snippet", {})
+        vid = (item.get("id") or {}).get("videoId")
+        title = snip.get("title") or ""
+        pub_raw = snip.get("publishedAt") or ""
+        if not vid or not title:
+            continue
+        # HTML entities (like &amp;) may appear in API responses
+        title = (title.replace("&amp;", "&").replace("&quot;", '"')
+                      .replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">"))
+        candidates.append({
+            "video_id": vid,
+            "title": title.strip(),
+            "published": _published_to_jst_date(pub_raw),
+            "description": snip.get("description") or "",
+        })
+
+    # Drop Shorts
+    candidates = [
+        v for v in candidates
+        if "#shorts" not in v["title"].lower() and "#short" not in v["title"].lower()
+    ]
+
+    today = datetime.now(JST).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(JST) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    def is_live(v: dict) -> bool:
+        t = v["title"]
+        return any(k in t for k in ("ライブ", "live", "LIVE", "家計改善", "収入アップ"))
+
+    for bucket in (
+        [v for v in candidates if v["published"] == today and is_live(v)],
+        [v for v in candidates if v["published"] == yesterday and is_live(v)],
+        [v for v in candidates if is_live(v)],
+        [v for v in candidates if v["published"] == today],
+        [v for v in candidates if v["published"] == yesterday],
+        candidates,
+    ):
+        if bucket:
+            picked = bucket[0]
+            print(f"[SEARCH] YouTube API picked {picked['video_id']} ({picked['published']})", file=sys.stderr)
+            return picked
+    return None
+
+
 def fetch_latest_live_video_ytdlp() -> dict | None:
     """Use yt-dlp to enumerate the channel's recent live streams.
 
@@ -169,7 +244,12 @@ def fetch_latest_live_video_ytdlp() -> dict | None:
 
 def fetch_latest_live_video() -> dict | None:
     """Return dict with video_id, title, published (JST YYYY-MM-DD), description."""
-    # Primary: yt-dlp (works from GH Actions runners)
+    # Primary: YouTube Data API v3 search (most reliable for latest video)
+    via_api = fetch_latest_live_video_api()
+    if via_api:
+        return via_api
+
+    # Secondary: yt-dlp
     via_ytdlp = fetch_latest_live_video_ytdlp()
     if via_ytdlp:
         return via_ytdlp
