@@ -227,11 +227,18 @@ const DEFAULT_FAN_QUESTIONS = [
 ];
 
 // ========== じゃんけん問題 ==========
-// 日付ベースで学長の手を固定（同じ日は全員同じ結果・毎日変わる）
+// quiz-data.json の jankenHand (0=グー,1=チョキ,2=パー) を使用。
+// 取得できなかった場合は日付ベースでフォールバック。
+let _liveJankenHand = null; // quiz-data.json から設定される
 const makeJankenQuestion = () => {
-  const t=new Date();
-  const daySeed=t.getFullYear()*10000+(t.getMonth()+1)*100+t.getDate();
-  const gakuchoHand = (daySeed*7+13)%3; // 日付から決定的にグー/チョキ/パーを決める
+  let gakuchoHand;
+  if (_liveJankenHand !== null && _liveJankenHand !== undefined && _liveJankenHand >= 0 && _liveJankenHand <= 2) {
+    gakuchoHand = _liveJankenHand;
+  } else {
+    const t=new Date();
+    const daySeed=t.getFullYear()*10000+(t.getMonth()+1)*100+t.getDate();
+    gakuchoHand = (daySeed*7+13)%3;
+  }
   const handNames=["グー✊","チョキ✌️","パー🖐️"];
   return {
     question:`🦁 学長じゃんけん！\nじゃんけん！！`,
@@ -540,6 +547,11 @@ function App() {
         const data=await res.json();
         if(!data||!data.questions||!Array.isArray(data.questions)||data.questions.length===0)return false;
         if(data.date!==todayStr)return false;
+        // ジャンケンの手をセット（ライブ配信から検出された手）
+        if(typeof data.jankenHand==="number"&&data.jankenHand>=0&&data.jankenHand<=2){
+          _liveJankenHand=data.jankenHand;
+          console.log("🤜 学長じゃんけん: ライブから検出 →",["グー","チョキ","パー"][data.jankenHand]);
+        }
         const qs=data.questions.slice(0,4).map(q=>({
           question:q.question||"",
           choices:Array.isArray(q.choices)?q.choices:[],

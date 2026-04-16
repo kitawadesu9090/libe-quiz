@@ -618,6 +618,48 @@ def _extract_transcript_text(raw: str) -> str:
     return "\n".join(parts)
 
 
+# ---------- ジャンケン検出 ----------
+
+
+def detect_janken_hand(transcript: str) -> int | None:
+    """ライブ配信冒頭の学長じゃんけんの手を検出する。
+
+    Returns:
+        0=グー, 1=チョキ, 2=パー, None=検出できず
+    """
+    if not transcript:
+        return None
+
+    # 配信冒頭部分（最初の3000文字程度）に「じゃんけん」→手がある
+    head = transcript[:3000]
+
+    # パターン: 「じゃんけん(ぽん/ぽい)」の後に最初に出る手を検出
+    janken_match = re.search(
+        r"じゃんけん[ぽポ]?[んンい]?[！!]?\s*"
+        r"(グー|ぐー|チョキ|ちょき|パー|ぱー)",
+        head,
+    )
+    if janken_match:
+        hand_str = janken_match.group(1)
+        if hand_str in ("グー", "ぐー"):
+            return 0
+        elif hand_str in ("チョキ", "ちょき"):
+            return 1
+        elif hand_str in ("パー", "ぱー"):
+            return 2
+
+    # フォールバック: 冒頭で「じゃんけん」近くに手が出る箇所を探す
+    for pattern, hand_id in [
+        (r"[じジ]ゃんけん.*?(グー|ぐー)", 0),
+        (r"[じジ]ゃんけん.*?(チョキ|ちょき)", 1),
+        (r"[じジ]ゃんけん.*?(パー|ぱー)", 2),
+    ]:
+        if re.search(pattern, head, re.S):
+            return hand_id
+
+    return None
+
+
 # ---------- Gemini ----------
 
 
@@ -629,9 +671,11 @@ GEMINI_SYSTEM_PROMPT = """\
 指定された「本日の両学長ライブ配信」の動画タイトル・概要欄（チャプター付き）
 ・字幕テキスト（ある場合）を読み、リベ大ファンが楽しめる4問のクイズを作ります。
 
-【厺守ルール】
+【厳守ルール】
 1. **必ずその配信の内容に即した問題**にすること。配信で明確に語られた
    話題・質問・学長の回答・数値・固有名詞を根拠にする。
+   ※ 動画タイトルだけを根拠にした表層的な問題は絶対禁止。概要欄の
+   チャプタータイトルや字幕の具体的発言から出題すること。
 2. 問題文は「視聴者のお悩み相談」「学長の主張」「配信中の具体的エピソード」
    「配信中に出た数字や固有名詞」など多様に。ワンパターン禁止。
 3. 選択肢は必ず4つ。正解はそのうち1つ。ダミー3つは**配信内容から見て
@@ -641,7 +685,16 @@ GEMINI_SYSTEM_PROMPT = """\
 5. 問題文と選択肢はスマホで読みやすいように短く（選択肢は6〜34文字目安）。
 6. 問題文の途中改行は "\\n"（バックスラッシュ n）を含める。
 7. 解説は1〜2行で、なぜそれが正解かを配信内容に触れて説明する。絵文字1〜2個OK。
-8. 配信内容に明確な根拠がない話題は問題にしないこな（ハルシネーション禁止）。
+   ※ 「タイトルにある通り」等ではなく「配信で〇〇と説明された」のように
+   配信の中身に言及すること。
+8. 配信内容に明確な根拠がない話題は問題にしないこと（ハルシネーション禁止）。
+9. 字幕テキストが提供されている場合は、必ず字幕の内容を根拠に含めること。
+   字幕がない場合は概要欄のチャプター情報を根拠にすること。
+
+【じゃんけん検出】
+字幕テキストの冒頭部分に学長のじゃんけんが含まれている場合、
+学長が出した手を検出してください。「じゃんけん」のあとに「グー」「チョキ」
+「パー」のどれが出たかを見ます。
 
 【出力形式】
 以下のJSONだけを返してください。マークダウンのコードブロックや前後の
@@ -656,8 +709,12 @@ GEMINI_SYSTEM_PROMPT = """\
       "explanation": "正解の根拠を1〜2行で"
     },
     ... 合計4問 ...
-  ]
+  ],
+  "jankenHand": 0
 }
+
+jankenHand: 学長が出した手。0=グー, 1=チョキ, 2=パー。
+字幕からじゃんけんが検出できない場合は null にしてください。
 """
 
 
@@ -757,7 +814,8 @@ def call_gemini(video: dict, description: str, transcript: str) -> list[dict]:
     questions = data.get("questions") if isinstance(data, dict) else None
     if not isinstance(questions, list):
         raise RuntimeError(f"Gemini response has no 'questions' list: {text[:300]}")
-    return questions
+    janken_hand = data.get("jankenHand") if isinstance(data, dict) else None
+    return questions, janken_hand
 
 
 # ---------- Validation ----------
@@ -816,8 +874,18 @@ def main() -> int:
     transcript = fetch_transcript(video["video_id"])
     print(f"[INFO] Transcript length: {len(transcript)} chars")
 
-    questions_raw = call_gemini(video, description, transcript)
+    questions_raw, gemini_janken = call_gemini(video, description, transcript)
     questions = validate_questions(questions_raw)
+
+    # ジャンケン検出: 字幕から直接検出 → Geminiの検出結果 → None
+    janken_hand = detect_janken_hand(transcript)
+    if janken_hand is not None:
+        print(f"[JANKEN] 字幕から検出: {['グー','チョキ','パー'][janken_hand]}", file=sys.stderr)
+    elif isinstance(gemini_janken, int) and 0 <= gemini_janken <= 2:
+        janken_hand = gemini_janken
+        print(f"[JANKEN] Geminiから検出: {['グー','チョキ','パー'][janken_hand]}", file=sys.stderr)
+    else:
+        print("[JANKEN] 検出できず（サイト側でランダム生成）", file=sys.stderr)
 
     today = datetime.now(JST)
     today_str = today.strftime("%Y-%m-%d")
@@ -841,6 +909,7 @@ def main() -> int:
         "generatedAt": today.isoformat(timespec="seconds"),
         "generatedBy": "github-actions (gemini-2.5-flash)",
         "questions": questions,
+        "jankenHand": janken_hand,  # 0=グー, 1=チョキ, 2=パー, null=不明
     }
 
     OUTPUT_PATH.write_text(
