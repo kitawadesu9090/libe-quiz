@@ -821,8 +821,31 @@ function App() {
                 </div>
               </div>
             )}
-            {/* 5つの力グリッド（メインのナビ） */}
-            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginTop:16,marginBottom:16}}>
+            {/* 学長ライブ問題（今日のライブ配信から出題・メインフィーチャー） */}
+            {(()=>{
+              const liveLoaded=fanQuestions&&fanQuestions.length>0;
+              const liveVideo=localStorage.getItem("libe_fan_video")||"";
+              return(
+              <button onClick={()=>liveLoaded&&handleSelectLevel("fan")} disabled={!liveLoaded} style={{width:"100%",padding:0,background:liveLoaded?"linear-gradient(135deg,#384860 0%,#2A3648 100%)":"#F2F2F2",border:"none",borderRadius:18,cursor:liveLoaded?"pointer":"default",boxShadow:liveLoaded?"0 6px 20px rgba(56,72,96,0.25)":"none",marginTop:16,marginBottom:14,overflow:"hidden",textAlign:"left",position:"relative"}}>
+                <div style={{padding:"16px 18px",display:"flex",alignItems:"center",gap:14}}>
+                  <div style={{width:52,height:52,borderRadius:14,background:liveLoaded?"rgba(255,163,13,0.22)":"rgba(56,72,96,0.08)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:26,flexShrink:0,border:liveLoaded?"1.5px solid rgba(255,163,13,0.45)":"none"}}>📺</div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+                      {liveLoaded&&<div style={{width:7,height:7,borderRadius:"50%",background:"#FF4757",boxShadow:"0 0 0 3px rgba(255,71,87,0.25)"}}/>}
+                      <p style={{fontSize:10,fontWeight:700,color:liveLoaded?"#FFA30D":"#8A96A8",letterSpacing:"1px"}}>LIVE · 今日の両学長</p>
+                    </div>
+                    <p style={{fontSize:16,fontWeight:700,color:liveLoaded?"#FFFFFF":"#5A6B82",lineHeight:1.25,marginBottom:3}}>{liveLoaded?"学長ライブ問題":"ライブ問題はまだ取得中..."}</p>
+                    <p style={{fontSize:11,fontWeight:500,color:liveLoaded?"rgba(255,255,255,0.70)":"#8A96A8",lineHeight:1.4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{liveLoaded?(liveVideo.slice(0,40)+(liveVideo.length>40?"...":"")||"4問＋じゃんけん！"):"毎朝9時に更新されます"}</p>
+                  </div>
+                  {liveLoaded&&<div style={{color:"#FFD700",fontSize:22,fontWeight:700,flexShrink:0}}>›</div>}
+                </div>
+              </button>
+              );
+            })()}
+
+            {/* 5つの力グリッド（カテゴリナビ） */}
+            <p style={{fontSize:12,color:"#8A96A8",fontWeight:600,marginBottom:10,textAlign:"left",paddingLeft:4}}>お金の5つの力で学ぶ</p>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:16}}>
               {[
                 {power:"save",emoji:"💰",label:"貯める",bg:"#E8F5DF",color:"#478E21"},
                 {power:"earn",emoji:"💼",label:"稼ぐ",bg:"#FDE3EC",color:"#DE1B65"},
