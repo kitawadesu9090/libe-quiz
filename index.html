@@ -782,21 +782,17 @@ function App() {
 
   return (
     <div style={{position:"relative",width:"100vw",minHeight:"100vh",overflow:"auto",background:"#FFFCF2",display:"flex",flexDirection:"column",alignItems:"center",padding:0}}>
-      {/* リベシティ風のダークネイビーヘッダー */}
+      {/* シンプルなヘッダー */}
       {screen==="menu"&&(
-        <div style={{width:"100%",background:"linear-gradient(135deg,#384860 0%,#2A3648 100%)",padding:"14px 20px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",boxShadow:"0 2px 8px rgba(56,72,96,0.15)",position:"sticky",top:0,zIndex:10}}>
+        <div style={{width:"100%",maxWidth:440,display:"flex",alignItems:"center",justifyContent:"space-between",padding:"20px 20px 8px"}}>
           <div style={{display:"flex",alignItems:"center",gap:10}}>
-            <div style={{width:36,height:36,borderRadius:10,background:"linear-gradient(135deg,#478E21 0%,#6AAE3D 100%)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,boxShadow:"0 2px 6px rgba(71,142,33,0.3)"}}>🦁</div>
-            <div>
-              <p style={{fontSize:15,fontWeight:700,color:"#FFFFFF",lineHeight:1}}>リベ大クイズ</p>
-              <p style={{fontSize:10,color:"rgba(255,255,255,0.65)",fontWeight:500,marginTop:2,letterSpacing:"0.5px"}}>UNOFFICIAL · お金の勉強会</p>
-            </div>
+            <div onClick={()=>{setLionRain(true);setTimeout(()=>setLionRain(false),5000);}} style={{width:38,height:38,borderRadius:"50%",background:"linear-gradient(135deg,#478E21 0%,#6AAE3D 100%)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,cursor:"pointer",boxShadow:"0 2px 8px rgba(71,142,33,0.25)"}}>🦁</div>
+            <p style={{fontSize:17,fontWeight:700,color:"#384860",letterSpacing:"-0.3px"}}>リベ大クイズ</p>
           </div>
-          <button onClick={()=>{setLionRain(true);setTimeout(()=>setLionRain(false),5000);}} style={{width:36,height:36,borderRadius:10,background:"rgba(255,255,255,0.10)",border:"1px solid rgba(255,255,255,0.15)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,cursor:"pointer",color:"#FFFFFF"}}>🦁</button>
         </div>
       )}
       <canvas ref={canvasRef} style={{position:"fixed",top:0,left:0,width:"100%",height:"100%",pointerEvents:"none"}}/>
-      <div style={{position:"relative",zIndex:1,textAlign:"center",width:"100%",maxWidth:440,padding:screen==="menu"?"20px 16px 40px":"32px 16px 40px"}}>
+      <div style={{position:"relative",zIndex:1,textAlign:"center",width:"100%",maxWidth:440,padding:screen==="menu"?"0 20px 32px":"32px 20px 40px"}}>
 
         {screen==="menu"&&(
           <div style={{animation:"bounceIn 0.5s ease",position:"relative"}}>
@@ -825,141 +821,63 @@ function App() {
                 </div>
               </div>
             )}
-            {/* ウェルカム */}
-            <div style={{textAlign:"left",marginBottom:18,paddingLeft:2}}>
-              <p style={{fontSize:12,color:"#8A96A8",fontWeight:600,marginBottom:3}}>{new Date().getMonth()+1}月{new Date().getDate()}日（{['日','月','火','水','木','金','土'][new Date().getDay()]}）</p>
-              <h2 style={{fontSize:22,fontWeight:700,color:"#384860",letterSpacing:"-0.3px",lineHeight:1.3}}>今日もコツコツ、<br/><span style={{color:"#478E21"}}>お金の勉強</span>しよう 🌱</h2>
+            {/* 5つの力グリッド（メインのナビ） */}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginTop:16,marginBottom:16}}>
+              {[
+                {power:"save",emoji:"💰",label:"貯める",bg:"#E8F5DF",color:"#478E21"},
+                {power:"earn",emoji:"💼",label:"稼ぐ",bg:"#FDE3EC",color:"#DE1B65"},
+                {power:"grow",emoji:"📈",label:"増やす",bg:"#FFF4DC",color:"#FFA30D"},
+                {power:"protect",emoji:"🛡",label:"守る",bg:"#DFEEF9",color:"#3498DB"},
+                {power:"use",emoji:"✨",label:"使う",bg:"#EDDFF3",color:"#9B59B6"},
+                {power:"_all",emoji:"🎯",label:"ぜんぶ",bg:"#FFFFFF",color:"#384860"},
+              ].map(p=>(
+                <button key={p.label} onClick={()=>p.power==="_all"?setScreen("level_select"):handleSelectPower(p.power)} style={{background:p.bg,border:"none",cursor:"pointer",padding:"20px 8px 16px",borderRadius:16,display:"flex",flexDirection:"column",alignItems:"center",gap:8,boxShadow:"0 2px 8px rgba(56,72,96,0.06)",minHeight:100}}>
+                  <div style={{fontSize:30,lineHeight:1}}>{p.emoji}</div>
+                  <span style={{fontSize:13,fontWeight:700,color:p.color}}>{p.label}</span>
+                </button>
+              ))}
             </div>
 
-            {/* メインクイズカード（リベシティのダッシュボードカード風） */}
-            <div style={{background:"#FFFFFF",borderRadius:16,padding:"20px",marginBottom:14,boxShadow:"0 2px 8px rgba(56,72,96,0.08)",border:"1px solid rgba(56,72,96,0.06)",textAlign:"left",position:"relative",overflow:"hidden"}}>
-              <div style={{display:"flex",alignItems:"flex-start",gap:14,marginBottom:16}}>
-                <div style={{width:52,height:52,borderRadius:14,background:"linear-gradient(135deg,#FFF4DC 0%,#FFE8B8 100%)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:28,flexShrink:0,border:"1px solid rgba(255,163,13,0.2)"}}>🎯</div>
-                <div style={{flex:1,minWidth:0}}>
-                  <p style={{fontSize:11,fontWeight:700,color:"#FFA30D",letterSpacing:"0.5px",marginBottom:3}}>DAILY QUIZ</p>
-                  <h3 style={{fontSize:17,fontWeight:700,color:"#384860",lineHeight:1.3,marginBottom:4}}>今日のクイズに挑戦</h3>
-                  <p style={{fontSize:12,color:"#5A6B82",fontWeight:500,lineHeight:1.5}}>リベ大で学ぶお金の知識を、4択クイズで楽しく復習しよう</p>
-                </div>
-              </div>
-              <button onClick={()=>setScreen("level_select")} style={{width:"100%",padding:"13px 20px",fontSize:15,fontWeight:700,color:"#FFFFFF",background:"linear-gradient(135deg,#478E21 0%,#3A7619 100%)",border:"none",borderRadius:999,cursor:"pointer",boxShadow:"0 2px 8px rgba(71,142,33,0.25)",display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
-                <span>クイズをはじめる</span>
-                <span style={{fontSize:14}}>→</span>
-              </button>
-            </div>
+            {/* デイリーチャレンジ（大きなボタン） */}
+            <button onClick={()=>handleSelectLevel("daily")} disabled={isDailyDone()} style={{width:"100%",padding:"18px 20px",fontSize:16,fontWeight:700,color:"#FFFFFF",background:isDailyDone()?"#CCD1DB":"linear-gradient(135deg,#DE1B65 0%,#FFA30D 100%)",border:"none",borderRadius:16,cursor:isDailyDone()?"default":"pointer",boxShadow:isDailyDone()?"none":"0 4px 12px rgba(222,27,101,0.25)",display:"flex",alignItems:"center",justifyContent:"center",gap:10,marginBottom:12,minHeight:60}}>
+              <span style={{fontSize:22}}>{isDailyDone()?"✓":"🔥"}</span>
+              <span>{isDailyDone()?"今日はクリア済み":"デイリーチャレンジ"}</span>
+              {!isDailyDone()&&dailyStreak.streak>0&&<span style={{background:"rgba(255,255,255,0.25)",padding:"3px 10px",borderRadius:999,fontSize:12,fontWeight:700}}>{dailyStreak.streak}日</span>}
+            </button>
 
-            {/* 今日の学長メッセージ */}
-            <div style={{background:"#FFFFFF",borderRadius:16,padding:"16px",marginBottom:14,boxShadow:"0 2px 8px rgba(56,72,96,0.08)",border:"1px solid rgba(56,72,96,0.06)",textAlign:"left"}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,paddingBottom:10,borderBottom:"1px solid #F2F2F2"}}>
-                <div style={{width:32,height:32,borderRadius:"50%",background:"linear-gradient(135deg,#478E21 0%,#6AAE3D 100%)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>🦁</div>
-                <div>
-                  <p style={{fontSize:13,fontWeight:700,color:"#384860",lineHeight:1}}>両学長</p>
-                  <p style={{fontSize:10,color:"#8A96A8",fontWeight:500,marginTop:2}}>今日のひとこと</p>
-                </div>
-              </div>
-              <p style={{color:"#384860",fontSize:14,fontWeight:500,lineHeight:1.6,margin:0}}>{todayMeigen}</p>
-            </div>
-
-            {/* ステータスカード（2カラム） */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
-              <div style={{background:"#FFFFFF",borderRadius:14,padding:"14px 14px",boxShadow:"0 2px 8px rgba(56,72,96,0.06)",border:"1px solid rgba(56,72,96,0.06)",textAlign:"left"}}>
-                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
-                  <div style={{width:28,height:28,borderRadius:8,background:"#FFF0EB",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>🔥</div>
-                  <p style={{fontSize:11,color:"#8A96A8",fontWeight:600}}>連続日数</p>
-                </div>
-                <p style={{fontSize:24,fontWeight:700,color:"#384860",lineHeight:1}}>{dailyStreak.streak}<span style={{fontSize:12,color:"#8A96A8",fontWeight:500,marginLeft:3}}>日</span></p>
-                {dailyStreak.bestStreak>0&&<p style={{fontSize:10,color:"#8A96A8",fontWeight:500,marginTop:3}}>最高 {dailyStreak.bestStreak}日</p>}
-              </div>
-              <div style={{background:"#FFFFFF",borderRadius:14,padding:"14px 14px",boxShadow:"0 2px 8px rgba(56,72,96,0.06)",border:"1px solid rgba(56,72,96,0.06)",textAlign:"left"}}>
-                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
-                  <div style={{width:28,height:28,borderRadius:8,background:"#E8F5DF",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>📺</div>
-                  <p style={{fontSize:11,color:"#8A96A8",fontWeight:600}}>今日のライブ</p>
-                </div>
-                {(()=>{const d=localStorage.getItem("libe_fan_last");return d?(
-                  <p style={{fontSize:14,fontWeight:700,color:"#478E21",lineHeight:1}}>取得済み<span style={{marginLeft:4}}>✓</span></p>
-                ):(
-                  <p style={{fontSize:12,fontWeight:500,color:"#8A96A8",lineHeight:1.3}}>まだ取得されていません</p>
-                );})()}
-              </div>
-            </div>
-
-            {/* 5つの力（クリックでその力のクイズに直行） */}
-            <div style={{background:"#FFFFFF",borderRadius:16,padding:"16px",boxShadow:"0 2px 8px rgba(56,72,96,0.08)",border:"1px solid rgba(56,72,96,0.06)",textAlign:"left"}}>
-              <p style={{fontSize:12,color:"#8A96A8",fontWeight:700,marginBottom:4,letterSpacing:"0.3px"}}>お金の5つの力で学ぶ</p>
-              <p style={{fontSize:11,color:"#8A96A8",fontWeight:500,marginBottom:12}}>タップすると、その力のクイズに挑戦できます</p>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:6}}>
-                {[
-                  {power:"save",emoji:"💰",label:"貯める",color:"#478E21",bg:"#E8F5DF"},
-                  {power:"earn",emoji:"💼",label:"稼ぐ",color:"#DE1B65",bg:"#FDE3EC"},
-                  {power:"grow",emoji:"📈",label:"増やす",color:"#FFA30D",bg:"#FFF4DC"},
-                  {power:"protect",emoji:"🛡",label:"守る",color:"#3498DB",bg:"#DFEEF9"},
-                  {power:"use",emoji:"✨",label:"使う",color:"#9B59B6",bg:"#EDDFF3"},
-                ].map(p=>(
-                  <button key={p.label} onClick={()=>handleSelectPower(p.power)} style={{background:"transparent",border:"none",cursor:"pointer",padding:"8px 4px",display:"flex",flexDirection:"column",alignItems:"center",gap:6,transition:"transform 0.15s"}}>
-                    <div style={{width:42,height:42,borderRadius:12,background:p.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,boxShadow:"0 1px 3px rgba(56,72,96,0.06)"}}>{p.emoji}</div>
-                    <span style={{fontSize:11,fontWeight:700,color:p.color}}>{p.label}</span>
-                  </button>
-                ))}
-              </div>
+            {/* 今日の学長メッセージ（シンプルに） */}
+            <div style={{background:"#FFFFFF",borderRadius:14,padding:"14px",marginBottom:12,boxShadow:"0 2px 8px rgba(56,72,96,0.06)",textAlign:"left",display:"flex",gap:10,alignItems:"flex-start"}}>
+              <div style={{width:32,height:32,borderRadius:"50%",background:"#E8F5DF",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>🦁</div>
+              <p style={{color:"#384860",fontSize:13,fontWeight:500,lineHeight:1.55,margin:0,paddingTop:4}}>{todayMeigen}</p>
             </div>
           </div>
         )}
 
         {screen==="level_select"&&(
           <div style={{animation:"fadeIn 0.3s ease",textAlign:"left"}}>
-            {/* ヘッダー */}
-            <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:20}}>
-              <button onClick={handleBackToMenu} style={{width:40,height:40,borderRadius:10,background:"#FFFFFF",border:"1px solid rgba(56,72,96,0.10)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,color:"#384860",boxShadow:"0 1px 3px rgba(56,72,96,0.08)",flexShrink:0,fontWeight:600}}>←</button>
-              <div style={{flex:1,minWidth:0}}>
-                <p style={{fontSize:11,color:"#8A96A8",fontWeight:600,letterSpacing:"0.5px"}}>STEP 1 / 2</p>
-                <h2 style={{fontSize:20,fontWeight:700,color:"#384860",letterSpacing:"-0.3px",lineHeight:1.2,marginTop:2}}>クイズを選ぶ</h2>
-              </div>
+            {/* シンプルヘッダー */}
+            <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:24}}>
+              <button onClick={handleBackToMenu} style={{width:44,height:44,borderRadius:"50%",background:"#FFFFFF",border:"none",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,color:"#384860",boxShadow:"0 2px 8px rgba(56,72,96,0.08)",flexShrink:0,fontWeight:600}}>←</button>
+              <h2 style={{fontSize:22,fontWeight:700,color:"#384860",letterSpacing:"-0.3px"}}>難易度を選ぶ</h2>
             </div>
 
-            {/* 制限時間設定 */}
-            <div style={{background:"#FFFFFF",borderRadius:14,padding:"14px 16px",marginBottom:14,boxShadow:"0 2px 8px rgba(56,72,96,0.06)",border:"1px solid rgba(56,72,96,0.06)"}}>
-              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
-                <p style={{fontSize:11,color:"#8A96A8",fontWeight:700,letterSpacing:"0.5px"}}>⏱ 制限時間</p>
-                <p style={{fontSize:12,fontWeight:700,color:"#478E21"}}>{quizTimeLimit}秒/問</p>
-              </div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6}}>
-                {[10,15,20,30].map(v=>(
-                  <button key={v} onClick={()=>setQuizTimeLimit(v)} style={{padding:"10px 0",fontSize:13,fontWeight:700,borderRadius:999,minHeight:40,border:quizTimeLimit===v?"1.5px solid #478E21":"1px solid rgba(56,72,96,0.10)",background:quizTimeLimit===v?"#E8F5DF":"#F7F7F7",color:quizTimeLimit===v?"#478E21":"#5A6B82",cursor:"pointer",transition:"all 0.15s"}}>{v}秒</button>
-                ))}
-              </div>
+            {/* 制限時間（シンプルな4ボタン） */}
+            <p style={{fontSize:12,color:"#8A96A8",fontWeight:600,marginBottom:8}}>制限時間</p>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6,marginBottom:24}}>
+              {[10,15,20,30].map(v=>(
+                <button key={v} onClick={()=>setQuizTimeLimit(v)} style={{padding:"12px 0",fontSize:14,fontWeight:700,borderRadius:12,minHeight:44,border:"none",background:quizTimeLimit===v?"#384860":"#FFFFFF",color:quizTimeLimit===v?"#FFFFFF":"#5A6B82",cursor:"pointer",boxShadow:quizTimeLimit===v?"0 2px 8px rgba(56,72,96,0.20)":"0 1px 3px rgba(56,72,96,0.06)"}}>{v}秒</button>
+              ))}
             </div>
 
-            {/* デイリーチャレンジ（カラフルな特別カード） */}
-            <p style={{fontSize:11,color:"#8A96A8",fontWeight:700,letterSpacing:"0.5px",marginBottom:8,paddingLeft:4}}>🔥 今日のスペシャル</p>
-            <button onClick={()=>handleSelectLevel("daily")} disabled={isDailyDone()} style={{width:"100%",padding:0,background:isDailyDone()?"#F7F7F7":"linear-gradient(135deg,#DE1B65 0%,#FFA30D 100%)",border:isDailyDone()?"1px solid rgba(56,72,96,0.08)":"none",borderRadius:14,cursor:isDailyDone()?"default":"pointer",boxShadow:isDailyDone()?"none":"0 4px 16px rgba(222,27,101,0.20)",marginBottom:18,overflow:"hidden",textAlign:"left"}}>
-              <div style={{padding:"14px 16px",display:"flex",alignItems:"center",gap:12}}>
-                <div style={{width:44,height:44,borderRadius:12,background:isDailyDone()?"rgba(56,72,96,0.06)":"rgba(255,255,255,0.25)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0,border:isDailyDone()?"none":"1.5px solid rgba(255,255,255,0.35)"}}>{isDailyDone()?"✓":"🔥"}</div>
-                <div style={{flex:1,minWidth:0}}>
-                  <p style={{fontSize:10,fontWeight:700,color:isDailyDone()?"#8A96A8":"rgba(255,255,255,0.9)",letterSpacing:"0.5px",marginBottom:2}}>DAILY CHALLENGE</p>
-                  <p style={{fontSize:15,fontWeight:700,color:isDailyDone()?"#5A6B82":"#FFFFFF",lineHeight:1.2}}>{isDailyDone()?"今日はクリア済み":"デイリーチャレンジ"}</p>
-                  <p style={{fontSize:11,fontWeight:500,color:isDailyDone()?"#8A96A8":"rgba(255,255,255,0.9)",marginTop:2}}>{isDailyDone()?"また明日挑戦しよう":"全レベルから5問 · 1日1回"}</p>
-                </div>
-                {!isDailyDone()&&dailyStreak.streak>0&&(
-                  <div style={{background:"rgba(255,255,255,0.25)",padding:"4px 10px",borderRadius:999,fontSize:11,fontWeight:700,color:"#FFFFFF",flexShrink:0,border:"1px solid rgba(255,255,255,0.35)"}}>{dailyStreak.streak}日連続</div>
-                )}
-              </div>
-            </button>
-
-            {/* 難易度リスト */}
-            <p style={{fontSize:11,color:"#8A96A8",fontWeight:700,letterSpacing:"0.5px",marginBottom:8,paddingLeft:4}}>📚 難易度別クイズ</p>
-            <div style={{display:"flex",flexDirection:"column",gap:8}}>
-              {Object.entries(allLevels).map(([key,level])=>{
-                const descriptions={beginner:"リベ大の基本から楽しく勉強",intermediate:"実用的なお金の知識チェック",advanced:"節税・投資の応用テク",extreme:"ニュース&最新制度で激ムズ",fan:"今日のライブ配信から出題"};
-                return(
-                <button key={key} onClick={()=>handleSelectLevel(key)} style={{width:"100%",padding:"14px 14px",background:"#FFFFFF",border:"1px solid rgba(56,72,96,0.06)",borderRadius:14,cursor:"pointer",boxShadow:"0 2px 8px rgba(56,72,96,0.06)",display:"flex",alignItems:"center",gap:12,textAlign:"left",transition:"all 0.15s"}}>
-                  <div style={{width:44,height:44,borderRadius:12,background:level.gradient,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0,boxShadow:`0 2px 8px ${level.shadow}`}}>{level.emoji}</div>
-                  <div style={{flex:1,minWidth:0}}>
-                    <p style={{fontSize:15,fontWeight:700,color:"#384860",lineHeight:1.2,marginBottom:3}}>{level.label}</p>
-                    <p style={{fontSize:11.5,color:"#5A6B82",fontWeight:500,lineHeight:1.3}}>{descriptions[key]||"クイズに挑戦"}</p>
-                  </div>
-                  <div style={{color:"#8A96A8",fontSize:18,fontWeight:600,flexShrink:0}}>›</div>
+            {/* 難易度リスト（大きめのタッチ領域） */}
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              {Object.entries(allLevels).map(([key,level])=>(
+                <button key={key} onClick={()=>handleSelectLevel(key)} style={{width:"100%",padding:"16px",background:"#FFFFFF",border:"none",borderRadius:16,cursor:"pointer",boxShadow:"0 2px 8px rgba(56,72,96,0.06)",display:"flex",alignItems:"center",gap:14,textAlign:"left",minHeight:72}}>
+                  <div style={{width:48,height:48,borderRadius:14,background:level.gradient,display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,flexShrink:0,boxShadow:`0 2px 8px ${level.shadow}`}}>{level.emoji}</div>
+                  <p style={{flex:1,fontSize:16,fontWeight:700,color:"#384860",lineHeight:1.2}}>{level.label}</p>
+                  <div style={{color:"#8A96A8",fontSize:20,fontWeight:600,flexShrink:0}}>›</div>
                 </button>
-                );
-              })}
+              ))}
             </div>
           </div>
         )}
