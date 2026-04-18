@@ -701,6 +701,51 @@ function App() {
     const shuffled=shuffleArray(questions);
     return shuffled.slice(0,Math.min(count,questions.length));
   };
+  // ===== 5つの力のキーワード分類 =====
+  // 問題文+選択肢+解説を全て結合して、力のキーワードにマッチする問題を抽出する
+  const POWER_KEYWORDS={
+    save:["貯める","貯蓄","貯金","固定費","節約","家計簿","家計管理","先取り","通信費","格安SIM","電力会社","電気代","ガス","ふるさと納税","サブスク","暦年贈与","確定申告","e-Tax","財形","教育資金","特別徴収","普通徴収","青色","配偶者控除","特定扶養","雑所得","事業所得","減価償却","退職所得","損益通算","外国税額控除","国保","社会保険","壁","高額療養費","特定口座","インボイス","定額減税","源泉徴収","給与天引き","控除","e-Taxで","節税","手取り","支出","消費","お金を守る","貯まる","経費","インデックス","保険料","国民年金","付加年金","ポイント還元"],
+    earn:["稼ぐ","副業","転職","収入アップ","事業所得","フリーランス","給与","青色事業専従者","収入を増やす"],
+    grow:["増やす","投資","NISA","iDeCo","複利","株","配当","インデックス","証券","REIT","ETF","ポイント投資","72の法則","成長投資","つみたて","積立","投資信託","高配当","不動産投資","クロス取引","株主優待","信用取引","出口戦略","楽天証券","金融所得","確定給付","確定拠出","金融商品","資産運用","資産形成"],
+    protect:["守る","詐欺","ぼったくり","緊急予備費","生活防衛","公正証書","SNS型","4%ルール","ワンルーム","医療保険","生命保険","出口戦略","守る力","警告","リスク","損失","架空取引","架空請求","オレオレ","元本保証","絶対儲かる","国保逃れ","不正","インボイス制度"],
+    use:["使う力","有意義","価値あること","満足度","自己投資","使うべき","有効な使い方"],
+  };
+  const detectPower=(q)=>{
+    const text=`${q.question||""} ${(q.choices||[]).join(" ")} ${q.explanation||""}`;
+    const hits={save:0,earn:0,grow:0,protect:0,use:0};
+    Object.entries(POWER_KEYWORDS).forEach(([p,kws])=>{
+      kws.forEach(kw=>{if(text.includes(kw))hits[p]++;});
+    });
+    const max=Math.max(...Object.values(hits));
+    if(max===0)return null;
+    const winners=Object.entries(hits).filter(([,v])=>v===max).map(([k])=>k);
+    // 複数該当なら優先度順: save > grow > protect > earn > use
+    const priority=["save","grow","protect","earn","use"];
+    return priority.find(p=>winners.includes(p))||winners[0];
+  };
+  const getAllQuestionsPool=()=>{
+    const levels=getLevels();
+    const all=[];
+    Object.entries(levels).forEach(([k,lv])=>{
+      if(k==="fan")return;
+      (lv.questions||[]).forEach(q=>{if(!q.isJanken)all.push(q);});
+    });
+    return all;
+  };
+  const handleSelectPower=async(power)=>{
+    await startTone();
+    const all=getAllQuestionsPool();
+    const matched=all.filter(q=>detectPower(q)===power);
+    const pool=matched.length>=4?matched:all; // マッチ数少なすぎたら全体から
+    const POWER_LABELS={save:"貯める力",earn:"稼ぐ力",grow:"増やす力",protect:"守る力",use:"使う力"};
+    const POWER_EMOJI={save:"💰",earn:"💼",grow:"📈",protect:"🛡",use:"✨"};
+    const POWER_GRADIENT={save:"linear-gradient(135deg,#43c46e 0%,#2e9e54 100%)",earn:"linear-gradient(135deg,#DE1B65 0%,#B01852 100%)",grow:"linear-gradient(135deg,#FFA30D 0%,#E38800 100%)",protect:"linear-gradient(135deg,#3498DB 0%,#2874A6 100%)",use:"linear-gradient(135deg,#9B59B6 0%,#7D3C98 100%)"};
+    const POWER_SHADOW={save:"rgba(46,158,84,0.4)",earn:"rgba(222,27,101,0.4)",grow:"rgba(255,163,13,0.4)",protect:"rgba(52,152,219,0.4)",use:"rgba(155,89,182,0.4)"};
+    setDifficulty(`power_${power}`);
+    window.__currentPowerMeta={label:POWER_LABELS[power],emoji:POWER_EMOJI[power],gradient:POWER_GRADIENT[power],shadow:POWER_SHADOW[power],color:POWER_GRADIENT[power].match(/#[0-9a-fA-F]+/)?.[0]||"#478E21"};
+    const qs=prepareQuestions(getRandomQuestions(pool,4));
+    setQuestions(qs);setQuizIndex(0);setScore(0);setSelectedAnswer(null);setQuizRevealed(false);setQuizTimeLeft(quizTimeLimit);quizPrevTimeRef.current=quizTimeLimit;setScreen("quiz_play");
+  };
   const handleSelectLevel=async(key)=>{await startTone();if(key==="daily"){setDifficulty("daily");const levels=getLevels();const allQs=[];Object.entries(levels).forEach(([k,lv])=>{if(k!=="fan")allQs.push(...lv.questions);});const dailyQs=prepareQuestions(getTodayQuestions(allQs,5));setQuestions(dailyQs);setQuizIndex(0);setScore(0);setSelectedAnswer(null);setQuizRevealed(false);setQuizTimeLeft(quizTimeLimit);quizPrevTimeRef.current=quizTimeLimit;setScreen("quiz_play");return;}const levels=getLevels();const level=levels[key];setDifficulty(key);const pool=level.questions.filter(q=>!q.isJanken);const baseQs=prepareQuestions(key==="fan"?getTodayQuestions(pool,4):getRandomQuestions(pool,4));const qs=key==="fan"?[...baseQs,makeJankenQuestion()]:baseQs;setQuestions(qs);setQuizIndex(0);setScore(0);setSelectedAnswer(null);setQuizRevealed(false);setQuizTimeLeft(quizTimeLimit);quizPrevTimeRef.current=quizTimeLimit;setScreen("quiz_play");};
   const handleNextQuestion=()=>{if(quizIndex+1>=questions.length){const finalScore=score;const total=questions.filter(q=>!q.isJanken).length;setGakuchoResultComment(finalScore===total?pickRandom(GAKUCHO_PERFECT):finalScore>=total*0.5?pickRandom(GAKUCHO_GOOD):pickRandom(GAKUCHO_BAD));if(difficulty==="daily"){const result=saveDailyResult(finalScore,total);setDailyStreak({streak:result.streak,bestStreak:result.bestStreak,lastDate:"today",todayDone:true});}setScreen("quiz_done");playFinish();if(finalScore>=total*0.5){const burst=()=>{const c=canvasRef.current;if(!c)return;for(let i=0;i<6;i++)setTimeout(()=>fireworksRef.current.push(new Firework(Math.random()*c.width,Math.random()*c.height*0.6)),i*200);};burst();setTimeout(burst,800);setTimeout(burst,1600);}}else{setQuizIndex(i=>i+1);setSelectedAnswer(null);setQuizRevealed(false);setGakuchoComment("");setQuizTimeLeft(quizTimeLimit);quizPrevTimeRef.current=quizTimeLimit;}};
   const handleSelectAnswer=(idx)=>{if(quizRevealed)return;setSelectedAnswer(idx);playSelect();};
@@ -726,7 +771,7 @@ function App() {
   const isWarning=quizTimeLeft<=5&&quizTimeLeft>0&&!quizRevealed;
   const allLevels=getLevels();
   const DAILY_LEVEL={label:"デイリーチャレンジ",emoji:"🔥",color:"#e53935",gradient:"linear-gradient(135deg,#ff6b6b 0%,#ee5a24 100%)",shadow:"rgba(238,90,36,0.5)"};
-  const levelInfo=difficulty==="daily"?DAILY_LEVEL:(difficulty?allLevels[difficulty]:null);
+  const levelInfo=difficulty==="daily"?DAILY_LEVEL:(difficulty&&difficulty.startsWith("power_"))?(window.__currentPowerMeta||{label:"5つの力",emoji:"💪",color:"#478E21",gradient:"linear-gradient(135deg,#478E21 0%,#3A7619 100%)",shadow:"rgba(71,142,33,0.4)"}):(difficulty?allLevels[difficulty]:null);
   const cp=[
     {bg:"rgba(105,240,174,0.18)",border:"rgba(105,240,174,0.6)",solid:"#69f0ae",selectedBg:"rgba(105,240,174,0.4)",sb:"#2ecc71"},
     {bg:"rgba(255,110,180,0.15)",border:"rgba(255,110,180,0.55)",solid:"#ff6eb4",selectedBg:"rgba(255,110,180,0.35)",sb:"#d63384"},
@@ -837,19 +882,20 @@ function App() {
               </div>
             </div>
 
-            {/* 5つの力（リベ大らしいナビゲーション） */}
+            {/* 5つの力（クリックでその力のクイズに直行） */}
             <div style={{background:"#FFFFFF",borderRadius:16,padding:"16px",boxShadow:"0 2px 8px rgba(56,72,96,0.08)",border:"1px solid rgba(56,72,96,0.06)",textAlign:"left"}}>
-              <p style={{fontSize:12,color:"#8A96A8",fontWeight:700,marginBottom:10,letterSpacing:"0.3px"}}>お金の5つの力で学ぶ</p>
+              <p style={{fontSize:12,color:"#8A96A8",fontWeight:700,marginBottom:4,letterSpacing:"0.3px"}}>お金の5つの力で学ぶ</p>
+              <p style={{fontSize:11,color:"#8A96A8",fontWeight:500,marginBottom:12}}>タップすると、その力のクイズに挑戦できます</p>
               <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:6}}>
                 {[
-                  {emoji:"💰",label:"貯める",color:"#478E21",bg:"#E8F5DF"},
-                  {emoji:"💼",label:"稼ぐ",color:"#DE1B65",bg:"#FDE3EC"},
-                  {emoji:"📈",label:"増やす",color:"#FFA30D",bg:"#FFF4DC"},
-                  {emoji:"🛡",label:"守る",color:"#3498DB",bg:"#DFEEF9"},
-                  {emoji:"✨",label:"使う",color:"#9B59B6",bg:"#EDDFF3"},
+                  {power:"save",emoji:"💰",label:"貯める",color:"#478E21",bg:"#E8F5DF"},
+                  {power:"earn",emoji:"💼",label:"稼ぐ",color:"#DE1B65",bg:"#FDE3EC"},
+                  {power:"grow",emoji:"📈",label:"増やす",color:"#FFA30D",bg:"#FFF4DC"},
+                  {power:"protect",emoji:"🛡",label:"守る",color:"#3498DB",bg:"#DFEEF9"},
+                  {power:"use",emoji:"✨",label:"使う",color:"#9B59B6",bg:"#EDDFF3"},
                 ].map(p=>(
-                  <button key={p.label} onClick={()=>setScreen("level_select")} style={{background:"transparent",border:"none",cursor:"pointer",padding:"8px 4px",display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-                    <div style={{width:40,height:40,borderRadius:12,background:p.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>{p.emoji}</div>
+                  <button key={p.label} onClick={()=>handleSelectPower(p.power)} style={{background:"transparent",border:"none",cursor:"pointer",padding:"8px 4px",display:"flex",flexDirection:"column",alignItems:"center",gap:6,transition:"transform 0.15s"}}>
+                    <div style={{width:42,height:42,borderRadius:12,background:p.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,boxShadow:"0 1px 3px rgba(56,72,96,0.06)"}}>{p.emoji}</div>
                     <span style={{fontSize:11,fontWeight:700,color:p.color}}>{p.label}</span>
                   </button>
                 ))}
