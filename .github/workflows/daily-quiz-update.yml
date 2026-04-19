@@ -1,9 +1,12 @@
 name: Daily Quiz Update
 
-# Runs every morning at 09:00 JST (00:00 UTC) and can be triggered manually.
+# Runs twice a day:
+#   - 09:30 JST (00:30 UTC): ライブ終了直後。概要欄ベースで暫定生成。
+#   - 14:00 JST (05:00 UTC): 字幕生成を待った再実行。ジャンケン・問題品質が向上。
 on:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '30 0 * * *'   # 09:30 JST
+    - cron: '0 5 * * *'    # 14:00 JST
   workflow_dispatch:
 
 permissions:

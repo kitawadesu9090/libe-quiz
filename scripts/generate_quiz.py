@@ -621,6 +621,101 @@ def _extract_transcript_text(raw: str) -> str:
 # ---------- ジャンケン検出 ----------
 
 
+def detect_janken_hand_vision(video_id: str) -> int | None:
+    """Gemini Vision で YouTube 動画を直接解析し、学長が出したじゃんけんの手を検出。
+
+    字幕がまだ生成されていない配信でも使える。Gemini 2.5 は YouTube URL を
+    file_data として受け取って動画内容を解析できる。
+
+    Returns:
+        0=グー, 1=チョキ, 2=パー, None=検出失敗
+    """
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        print("[JANKEN-VISION] GEMINI_API_KEY not set", file=sys.stderr)
+        return None
+
+    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "fileData": {
+                            "fileUri": youtube_url,
+                            "mimeType": "video/mp4",
+                        },
+                        "videoMetadata": {
+                            "startOffset": "0s",
+                            "endOffset": "60s",
+                        },
+                    },
+                    {
+                        "text": (
+                            "この動画は両学長のライブ配信です。冒頭（最初の60秒以内）で、"
+                            "両学長がじゃんけんをしています。"
+                            "学長が最終的に画面に出したじゃんけんの手は何ですか？\n\n"
+                            "以下のJSONだけを返してください（他の文字は一切不要）:\n"
+                            '{"hand": "グー" | "チョキ" | "パー" | "不明"}\n\n'
+                            "判断基準:\n"
+                            "- グー: 握りこぶし\n"
+                            "- チョキ: 人差し指と中指を立てたVサイン\n"
+                            "- パー: 5本の指を開いた手\n"
+                            "冒頭に複数回手を出す場合は、じゃんけんの掛け声「ぽん！」の瞬間の手を採用。"
+                        )
+                    },
+                ],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.1,
+            "maxOutputTokens": 256,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    url = f"{GEMINI_URL}?key={api_key}"
+    try:
+        resp = http_post_json(url, payload, timeout=120)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        print(f"[JANKEN-VISION] HTTP {e.code}: {body[:300]}", file=sys.stderr)
+        return None
+    except Exception as exc:
+        print(f"[JANKEN-VISION] request failed: {exc}", file=sys.stderr)
+        return None
+
+    cands = resp.get("candidates") or []
+    if not cands:
+        print(f"[JANKEN-VISION] empty candidates: {json.dumps(resp)[:300]}", file=sys.stderr)
+        return None
+    parts = cands[0].get("content", {}).get("parts") or []
+    text = "".join(p.get("text", "") for p in parts).strip()
+    if not text:
+        print("[JANKEN-VISION] empty response", file=sys.stderr)
+        return None
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", text, re.S)
+        if not m:
+            print(f"[JANKEN-VISION] non-JSON response: {text[:200]}", file=sys.stderr)
+            return None
+        try:
+            data = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            return None
+
+    hand = str(data.get("hand", "")).strip()
+    mapping = {"グー": 0, "ぐー": 0, "チョキ": 1, "ちょき": 1, "パー": 2, "ぱー": 2}
+    if hand in mapping:
+        return mapping[hand]
+    print(f"[JANKEN-VISION] unrecognized hand: {hand}", file=sys.stderr)
+    return None
+
+
 def detect_janken_hand(transcript: str) -> int | None:
     """ライブ配信冒頭の学長じゃんけんの手を検出する。
 
@@ -957,15 +1052,24 @@ def main() -> int:
     questions_raw, gemini_janken = call_gemini(video, description, transcript)
     questions = validate_questions(questions_raw)
 
-    # ジャンケン検出: 字幕から直接検出 → Geminiの検出結果 → None
+    # ジャンケン検出:
+    #   1. 字幕から直接検出（最高精度・ただし字幕が生成済みであることが前提）
+    #   2. Gemini Vision で動画冒頭60秒を解析（字幕なしでも使える）
+    #   3. クイズ生成時に Gemini が字幕から検出した結果
     janken_hand = detect_janken_hand(transcript)
     if janken_hand is not None:
         print(f"[JANKEN] 字幕から検出: {['グー','チョキ','パー'][janken_hand]}", file=sys.stderr)
-    elif isinstance(gemini_janken, int) and 0 <= gemini_janken <= 2:
-        janken_hand = gemini_janken
-        print(f"[JANKEN] Geminiから検出: {['グー','チョキ','パー'][janken_hand]}", file=sys.stderr)
     else:
-        print("[JANKEN] 検出できず（サイト側でランダム生成）", file=sys.stderr)
+        # 字幕が取れなかった場合は Gemini Vision で動画を解析
+        vision_result = detect_janken_hand_vision(video["video_id"])
+        if vision_result is not None:
+            janken_hand = vision_result
+            print(f"[JANKEN] Gemini Visionで検出: {['グー','チョキ','パー'][janken_hand]}", file=sys.stderr)
+        elif isinstance(gemini_janken, int) and 0 <= gemini_janken <= 2:
+            janken_hand = gemini_janken
+            print(f"[JANKEN] Gemini字幕分析で検出: {['グー','チョキ','パー'][janken_hand]}", file=sys.stderr)
+        else:
+            print("[JANKEN] 検出できず（サイト側でランダム生成）", file=sys.stderr)
 
     today = datetime.now(JST)
     today_str = today.strftime("%Y-%m-%d")
