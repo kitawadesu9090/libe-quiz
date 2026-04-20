@@ -621,11 +621,27 @@ def _extract_transcript_text(raw: str) -> str:
 # ---------- ジャンケン検出 ----------
 
 
-def detect_janken_hand_vision(video_id: str) -> int | None:
-    """Gemini Vision で YouTube 動画を直接解析し、学長が出したじゃんけんの手を検出。
+def _get_video_duration_seconds(video_id: str) -> int | None:
+    """yt-dlp で動画の尺（秒）を取得。失敗時は None。"""
+    try:
+        from yt_dlp import YoutubeDL  # type: ignore
+        with YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as ydl:
+            info = ydl.extract_info(
+                f"https://www.youtube.com/watch?v={video_id}", download=False
+            )
+        dur = (info or {}).get("duration")
+        if isinstance(dur, (int, float)):
+            return int(dur)
+    except Exception as exc:
+        print(f"[JANKEN-VISION] duration fetch failed: {exc}", file=sys.stderr)
+    return None
 
-    字幕がまだ生成されていない配信でも使える。Gemini 2.5 は YouTube URL を
-    file_data として受け取って動画内容を解析できる。
+
+def detect_janken_hand_vision(video_id: str) -> int | None:
+    """Gemini Vision で YouTube 動画のエンディングを解析し、学長じゃんけんの手を検出。
+
+    両学長のじゃんけんは配信の **最後** で行われるため、動画の末尾 2分を解析する。
+    字幕がない配信でも使える。
 
     Returns:
         0=グー, 1=チョキ, 2=パー, None=検出失敗
@@ -634,6 +650,23 @@ def detect_janken_hand_vision(video_id: str) -> int | None:
     if not api_key:
         print("[JANKEN-VISION] GEMINI_API_KEY not set", file=sys.stderr)
         return None
+
+    # 動画の尺を取得してエンディング部分を特定
+    duration = _get_video_duration_seconds(video_id)
+    if duration and duration > 180:
+        # 末尾2分を解析（ライブは通常60分以上）
+        start_offset = f"{max(0, duration - 150)}s"
+        end_offset = f"{duration}s"
+    else:
+        # 尺が取れなかった場合はデフォルトで最後5分をリクエスト（長い動画想定）
+        start_offset = "3450s"  # 57.5分
+        end_offset = "3600s"    # 60分
+
+    print(
+        f"[JANKEN-VISION] analyzing video {video_id} "
+        f"duration={duration}s range={start_offset}-{end_offset}",
+        file=sys.stderr,
+    )
 
     youtube_url = f"https://www.youtube.com/watch?v={video_id}"
     payload = {
@@ -647,37 +680,42 @@ def detect_janken_hand_vision(video_id: str) -> int | None:
                             "mimeType": "video/mp4",
                         },
                         "videoMetadata": {
-                            "startOffset": "0s",
-                            "endOffset": "60s",
+                            "startOffset": start_offset,
+                            "endOffset": end_offset,
                         },
                     },
                     {
                         "text": (
-                            "この動画は両学長のライブ配信です。冒頭（最初の60秒以内）で、"
-                            "両学長がじゃんけんをしています。"
-                            "学長が最終的に画面に出したじゃんけんの手は何ですか？\n\n"
-                            "以下のJSONだけを返してください（他の文字は一切不要）:\n"
-                            '{"hand": "グー" | "チョキ" | "パー" | "不明"}\n\n'
+                            "この動画は両学長のリベラルアーツ大学のライブ配信のエンディング部分です。"
+                            "配信の最後に両学長は「学長じゃんけん！じゃんけん〇〇！バイバイ！」"
+                            "という形でじゃんけんを視聴者に向かって出します。\n\n"
+                            "学長が「バイバイ」と言う直前、じゃんけんで出した**最終的な手**を特定してください。\n\n"
                             "判断基準:\n"
-                            "- グー: 握りこぶし\n"
-                            "- チョキ: 人差し指と中指を立てたVサイン\n"
-                            "- パー: 5本の指を開いた手\n"
-                            "冒頭に複数回手を出す場合は、じゃんけんの掛け声「ぽん！」の瞬間の手を採用。"
+                            "- グー（✊）: 握りこぶし、5本の指すべてを握りしめている\n"
+                            "- チョキ（✌️）: 人差し指と中指を立てたVサイン、他の指は握っている\n"
+                            "- パー（✋）: 5本の指を全て開いて広げた手\n\n"
+                            "注意事項:\n"
+                            "- 「じゃん、けん、ぽん！」のリズムで複数フレームで手を出すので、"
+                            "「ぽん！」の瞬間（または「バイバイ」直前）の手を採用する\n"
+                            "- 手のひらの向き（前向き/手の甲向き）に関係なく、指の形で判定する\n"
+                            "- 確信が持てない場合は「不明」にする（推測しない）\n\n"
+                            "以下のJSONだけを返してください（他の文字は一切不要）:\n"
+                            '{"hand": "グー" | "チョキ" | "パー" | "不明", "reasoning": "判断根拠を一文で"}'
                         )
                     },
                 ],
             }
         ],
         "generationConfig": {
-            "temperature": 0.1,
-            "maxOutputTokens": 256,
+            "temperature": 0.0,
+            "maxOutputTokens": 512,
             "responseMimeType": "application/json",
         },
     }
 
     url = f"{GEMINI_URL}?key={api_key}"
     try:
-        resp = http_post_json(url, payload, timeout=120)
+        resp = http_post_json(url, payload, timeout=180)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         print(f"[JANKEN-VISION] HTTP {e.code}: {body[:300]}", file=sys.stderr)
@@ -709,6 +747,8 @@ def detect_janken_hand_vision(video_id: str) -> int | None:
             return None
 
     hand = str(data.get("hand", "")).strip()
+    reason = str(data.get("reasoning", "")).strip()
+    print(f"[JANKEN-VISION] response: hand={hand}, reason={reason[:100]}", file=sys.stderr)
     mapping = {"グー": 0, "ぐー": 0, "チョキ": 1, "ちょき": 1, "パー": 2, "ぱー": 2}
     if hand in mapping:
         return mapping[hand]
@@ -717,7 +757,15 @@ def detect_janken_hand_vision(video_id: str) -> int | None:
 
 
 def detect_janken_hand(transcript: str) -> int | None:
-    """ライブ配信冒頭の学長じゃんけんの手を検出する。
+    """両学長ライブ配信エンディングの「学長じゃんけん」で出した手を検出する。
+
+    両学長のじゃんけんは配信の **最後** で「学長じゃんけん！じゃんけん〇〇！バイバイ」
+    という流れで行われる。したがって字幕の末尾を優先的に探索する。
+
+    ASR による省略も考慮:
+      - 「グ」だけ（「グー」が短縮） → グー
+      - 「チョ」だけ（「チョキ」が短縮） → チョキ
+      - 「ぱー」のひらがな表記 → パー
 
     Returns:
         0=グー, 1=チョキ, 2=パー, None=検出できず
@@ -725,32 +773,50 @@ def detect_janken_hand(transcript: str) -> int | None:
     if not transcript:
         return None
 
-    # 配信冒頭部分（最初の3000文字程度）に「じゃんけん」→手がある
-    head = transcript[:3000]
+    # 配信末尾（最後の3000文字）に「学長じゃんけん」→手がある
+    tail = transcript[-3000:] if len(transcript) > 3000 else transcript
 
-    # パターン: 「じゃんけん(ぽん/ぽい)」の後に最初に出る手を検出
-    janken_match = re.search(
-        r"じゃんけん[ぽポ]?[んンい]?[！!]?\s*"
-        r"(グー|ぐー|チョキ|ちょき|パー|ぱー)",
-        head,
-    )
-    if janken_match:
-        hand_str = janken_match.group(1)
-        if hand_str in ("グー", "ぐー"):
+    # パターン1: 「学長じゃんけん」「じゃんけんぽん」の後に出る手を検出
+    # ASR省略に対応: グー/グ, チョキ/チョ/ちょ, パー/ぱー
+    janken_patterns = [
+        # 「学長じゃんけん...手」の厳密マッチ
+        (r"学長じゃんけん.{0,8}?(グー|ぐー|チョキ|ちょき|パー|ぱー)(?![ーっ])", "strict"),
+        # ASR省略: グ単独 (バイバイが続くことが多い)
+        (r"学長じゃんけん.{0,8}?グ(?:バイ|、|\s|$)", "gu_short"),
+        (r"学長じゃんけん.{0,8}?チョ(?:キ)?(?:バイ|、|\s|$)", "choki_short"),
+        (r"学長じゃんけん.{0,8}?パ(?:ー)?(?:バイ|、|\s|$)", "pa_short"),
+        # 末尾の「じゃんけん→バイバイ」の間にある手
+        (r"じゃんけん[じゃんけんぽん]*\s*(グー|ぐー|チョキ|ちょき|パー|ぱー).{0,20}?バイバイ", "before_bye"),
+        (r"じゃんけん.{0,15}?バイバイ", "bye_context"),
+    ]
+
+    for pattern, kind in janken_patterns:
+        m = re.search(pattern, tail)
+        if not m:
+            continue
+        matched = m.group(0)
+        # 手を判定
+        if "グー" in matched or "ぐー" in matched or re.search(r"じゃんけん.{0,8}?グ(?!ー)", matched):
             return 0
-        elif hand_str in ("チョキ", "ちょき"):
+        elif "チョキ" in matched or "ちょき" in matched or "チョ" in matched:
             return 1
-        elif hand_str in ("パー", "ぱー"):
+        elif "パー" in matched or "ぱー" in matched or "パ" in matched:
             return 2
 
-    # フォールバック: 冒頭で「じゃんけん」近くに手が出る箇所を探す
-    for pattern, hand_id in [
-        (r"[じジ]ゃんけん.*?(グー|ぐー)", 0),
-        (r"[じジ]ゃんけん.*?(チョキ|ちょき)", 1),
-        (r"[じジ]ゃんけん.*?(パー|ぱー)", 2),
-    ]:
-        if re.search(pattern, head, re.S):
-            return hand_id
+    # フォールバック: 末尾「バイバイ」手前に出現する手
+    bye_idx = tail.rfind("バイバイ")
+    if bye_idx > 0:
+        context = tail[max(0, bye_idx - 50):bye_idx]
+        for pattern, hand_id in [
+            (r"グ[ーー]?(?!オ)", 0),  # グー or グ（単独）
+            (r"チョ[キ]?", 1),         # チョキ or チョ
+            (r"パ[ーー]?", 2),         # パー or パ
+            (r"ぐー", 0),
+            (r"ちょき", 1),
+            (r"ぱー", 2),
+        ]:
+            if re.search(pattern, context):
+                return hand_id
 
     return None
 
